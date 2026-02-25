@@ -11,7 +11,6 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
-    "@ai-network/mediation-sdk-contracts": "file:../chat-ads-main/packages/mediation-sdk-contracts",
     "vue": "^3.5.26",
     "vue-router": "^4.6.4"
   },
