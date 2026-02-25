@@ -11,7 +11,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   'content-length',
 ])
 
-function normalizeUpstreamBaseUrl(rawValue) {
+const UPSTREAM_TIMEOUT_MS = 10_000
+
+export function normalizeUpstreamBaseUrl(rawValue) {
   const value = String(rawValue || '').trim()
   if (!value) return ''
 
@@ -35,11 +37,10 @@ function normalizeUpstreamBaseUrl(rawValue) {
   }
 }
 
-function resolveUpstreamBaseUrl() {
+export function resolveUpstreamBaseUrl(env = process.env) {
   const candidates = [
-    process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL,
-    process.env.VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL,
+    env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
+    env.MEDIATION_CONTROL_PLANE_API_BASE_URL,
   ]
   for (const candidate of candidates) {
     const normalized = normalizeUpstreamBaseUrl(candidate)
@@ -48,7 +49,7 @@ function resolveUpstreamBaseUrl() {
   return ''
 }
 
-function buildUpstreamUrl(req, upstreamBaseUrl) {
+export function buildUpstreamUrl(req, upstreamBaseUrl) {
   const requestUrl = new URL(req.url || '/api', 'http://localhost')
   const base = new URL(upstreamBaseUrl)
   const basePath = base.pathname.replace(/\/$/, '')
@@ -65,7 +66,7 @@ function buildUpstreamUrl(req, upstreamBaseUrl) {
   return base.toString()
 }
 
-function buildUpstreamHeaders(req) {
+export function buildUpstreamHeaders(req) {
   const headers = {}
   for (const [key, value] of Object.entries(req.headers || {})) {
     if (value === undefined || value === null) continue
@@ -76,7 +77,7 @@ function buildUpstreamHeaders(req) {
   return headers
 }
 
-async function readRequestBody(req) {
+export async function readRequestBody(req) {
   const method = String(req.method || 'GET').toUpperCase()
   if (method === 'GET' || method === 'HEAD') return undefined
 
@@ -94,7 +95,24 @@ async function readRequestBody(req) {
   return Buffer.concat(chunks)
 }
 
-function sendJson(res, statusCode, payload) {
+function setUpstreamResponseHeaders(res, upstreamResponse) {
+  const getSetCookie = upstreamResponse.headers?.getSetCookie
+  if (typeof getSetCookie === 'function') {
+    const cookies = getSetCookie.call(upstreamResponse.headers)
+    if (Array.isArray(cookies) && cookies.length > 0) {
+      res.setHeader('set-cookie', cookies)
+    }
+  }
+
+  for (const [key, value] of upstreamResponse.headers.entries()) {
+    const normalizedKey = String(key || '').toLowerCase()
+    if (normalizedKey === 'set-cookie') continue
+    if (HOP_BY_HOP_HEADERS.has(normalizedKey)) continue
+    res.setHeader(key, value)
+  }
+}
+
+export function sendJson(res, statusCode, payload) {
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.end(JSON.stringify(payload))
@@ -106,7 +124,7 @@ export default async function dashboardApiProxyHandler(req, res) {
     sendJson(res, 500, {
       error: {
         code: 'PROXY_TARGET_NOT_CONFIGURED',
-        message: 'Set MEDIATION_CONTROL_PLANE_API_PROXY_TARGET (or VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL) to your control-plane API origin.',
+        message: 'Set MEDIATION_CONTROL_PLANE_API_BASE_URL (or MEDIATION_CONTROL_PLANE_API_PROXY_TARGET) to your control-plane API origin.',
       },
     })
     return
@@ -116,29 +134,36 @@ export default async function dashboardApiProxyHandler(req, res) {
   const headers = buildUpstreamHeaders(req)
   const body = await readRequestBody(req)
 
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort('Upstream timeout')
+  }, UPSTREAM_TIMEOUT_MS)
+
   try {
     const upstreamResponse = await fetch(targetUrl, {
       method: String(req.method || 'GET').toUpperCase(),
       headers,
       body,
       redirect: 'manual',
+      signal: controller.signal,
     })
 
     res.statusCode = upstreamResponse.status
-    for (const [key, value] of upstreamResponse.headers.entries()) {
-      if (HOP_BY_HOP_HEADERS.has(String(key || '').toLowerCase())) continue
-      res.setHeader(key, value)
-    }
+    setUpstreamResponseHeaders(res, upstreamResponse)
 
     const buffer = Buffer.from(await upstreamResponse.arrayBuffer())
     res.end(buffer)
   } catch (error) {
+    const isTimeout = error instanceof Error && error.name === 'AbortError'
     sendJson(res, 502, {
       error: {
-        code: 'PROXY_UPSTREAM_FETCH_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to reach upstream API.',
-        target: targetUrl,
+        code: isTimeout ? 'PROXY_UPSTREAM_TIMEOUT' : 'PROXY_UPSTREAM_FETCH_FAILED',
+        message: isTimeout
+          ? 'Upstream API request timed out.'
+          : 'Failed to reach upstream API.',
       },
     })
+  } finally {
+    clearTimeout(timer)
   }
 }

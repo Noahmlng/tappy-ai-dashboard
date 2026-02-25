@@ -3,9 +3,7 @@ const API_BASE_URL = normalizeApiBaseUrl(
   import.meta.env.VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL || API_PROXY_BASE_URL,
 )
 
-let dashboardAccessToken = ''
-
-function normalizeApiBaseUrl(rawBaseUrl) {
+export function normalizeApiBaseUrl(rawBaseUrl) {
   const value = String(rawBaseUrl || '').trim()
   if (!value) return API_PROXY_BASE_URL
 
@@ -35,7 +33,7 @@ function normalizeApiBaseUrl(rawBaseUrl) {
   return `${pathname}/api`
 }
 
-function appendQuery(path, query) {
+export function appendQuery(path, query) {
   const entries = Object.entries(query || {}).filter(([, value]) => (
     value !== undefined && value !== null && value !== ''
   ))
@@ -49,11 +47,62 @@ function appendQuery(path, query) {
   return suffix ? `${path}?${suffix}` : path
 }
 
-async function requestJson(baseUrl, path, options = {}) {
-  const url = `${baseUrl}${appendQuery(path, options.query)}`
-  const headers = {
-    ...(options.headers || {}),
+function parseCookieHeader(source) {
+  if (!source) return []
+  return String(source)
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+export function getCookieValue(name, source) {
+  const normalizedName = String(name || '').trim()
+  if (!normalizedName) return ''
+
+  const cookieSource = source !== undefined
+    ? String(source || '')
+    : (typeof document !== 'undefined' ? String(document.cookie || '') : '')
+
+  for (const entry of parseCookieHeader(cookieSource)) {
+    const separatorIndex = entry.indexOf('=')
+    if (separatorIndex <= 0) continue
+    const key = entry.slice(0, separatorIndex).trim()
+    if (key !== normalizedName) continue
+    const rawValue = entry.slice(separatorIndex + 1)
+    try {
+      return decodeURIComponent(rawValue)
+    } catch {
+      return rawValue
+    }
   }
+  return ''
+}
+
+function shouldAttachCsrfToken(method) {
+  const normalizedMethod = String(method || 'GET').toUpperCase()
+  return !['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
+}
+
+function createRequestHeaders(method, headers = {}) {
+  const nextHeaders = {
+    ...headers,
+  }
+
+  if (!shouldAttachCsrfToken(method)) return nextHeaders
+  const alreadySet = Object.keys(nextHeaders).some((key) => key.toLowerCase() === 'x-csrf-token')
+  if (alreadySet) return nextHeaders
+
+  const csrfToken = getCookieValue('dash_csrf')
+  if (csrfToken) {
+    nextHeaders['x-csrf-token'] = csrfToken
+  }
+  return nextHeaders
+}
+
+async function requestJson(baseUrl, path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase()
+  const url = `${baseUrl}${appendQuery(path, options.query)}`
+  const headers = createRequestHeaders(method, options.headers || {})
 
   let body = options.body
   if (body && typeof body === 'object' && !(body instanceof FormData)) {
@@ -62,7 +111,7 @@ async function requestJson(baseUrl, path, options = {}) {
   }
 
   const response = await fetch(url, {
-    method: options.method || 'GET',
+    method,
     headers,
     body,
     credentials: 'include',
@@ -89,27 +138,12 @@ async function requestJson(baseUrl, path, options = {}) {
 
 function createControlPlaneClient(config = {}) {
   const baseUrl = normalizeApiBaseUrl(config.baseUrl)
-  let dashboardToken = String(config.dashboardToken || '').trim()
-
-  function authHeaders(extra = {}) {
-    return dashboardToken
-      ? { ...extra, Authorization: `Bearer ${dashboardToken}` }
-      : extra
-  }
-
-  function setAccessToken(token) {
-    dashboardToken = String(token || '').trim()
-  }
 
   function request(path, options = {}) {
-    return requestJson(baseUrl, path, {
-      ...options,
-      headers: authHeaders(options.headers || {}),
-    })
+    return requestJson(baseUrl, path, options)
   }
 
   return {
-    setAccessToken,
     health: {
       ping() {
         return request('/health')
@@ -180,20 +214,6 @@ function createControlPlaneClient(config = {}) {
         })
       },
     },
-    agent: {
-      issueIntegrationToken(payload = {}) {
-        return request('/v1/public/agent/integration-token', {
-          method: 'POST',
-          body: payload,
-        })
-      },
-      exchangeIntegrationToken(payload = {}) {
-        return request('/v1/public/agent/token-exchange', {
-          method: 'POST',
-          body: payload,
-        })
-      },
-    },
     placements: {
       list(query = {}) {
         return request('/v1/dashboard/placements', { query })
@@ -227,14 +247,6 @@ const fallbackClient = hasProxyFallback
   ? createControlPlaneClient({ baseUrl: API_PROXY_BASE_URL })
   : null
 
-export function setDashboardAccessToken(token) {
-  dashboardAccessToken = String(token || '').trim()
-}
-
-export function getDashboardAccessToken() {
-  return dashboardAccessToken
-}
-
 export class ControlPlaneApiError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -265,14 +277,12 @@ function normalizeControlPlaneError(error) {
 }
 
 async function withClientCall(callFactory) {
-  primaryClient.setAccessToken(dashboardAccessToken)
   try {
     return await callFactory(primaryClient)
   } catch (error) {
     const shouldRetryViaProxy = fallbackClient && isLikelyNetworkError(error)
     if (!shouldRetryViaProxy) throw normalizeControlPlaneError(error)
 
-    fallbackClient.setAccessToken(dashboardAccessToken)
     try {
       return await callFactory(fallbackClient)
     } catch (fallbackError) {
@@ -329,14 +339,6 @@ export const controlPlaneClient = {
     },
     logout() {
       return withClientCall((client) => client.auth.logout())
-    },
-  },
-  agent: {
-    issueIntegrationToken(payload) {
-      return withClientCall((client) => client.agent.issueIntegrationToken(payload || {}))
-    },
-    exchangeIntegrationToken(payload) {
-      return withClientCall((client) => client.agent.exchangeIntegrationToken(payload || {}))
     },
   },
   placements: {
