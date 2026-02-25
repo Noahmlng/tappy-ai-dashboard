@@ -9,7 +9,6 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const proxyTarget = (
     env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
-    || env.MEDIATION_API_PROXY_TARGET
     || 'http://127.0.0.1:3100'
   )
 
