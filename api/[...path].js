@@ -39,8 +39,8 @@ export function normalizeUpstreamBaseUrl(rawValue) {
 
 export function resolveUpstreamBaseUrl(env = process.env) {
   const candidates = [
-    env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
     env.MEDIATION_CONTROL_PLANE_API_BASE_URL,
+    env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
   ]
   for (const candidate of candidates) {
     const normalized = normalizeUpstreamBaseUrl(candidate)

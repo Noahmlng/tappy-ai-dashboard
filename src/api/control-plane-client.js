@@ -1,37 +1,4 @@
-const API_PROXY_BASE_URL = '/api'
-const API_BASE_URL = normalizeApiBaseUrl(
-  import.meta.env.VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL || API_PROXY_BASE_URL,
-)
-
-export function normalizeApiBaseUrl(rawBaseUrl) {
-  const value = String(rawBaseUrl || '').trim()
-  if (!value) return API_PROXY_BASE_URL
-
-  if (/^https?:\/\//i.test(value)) {
-    try {
-      const parsed = new URL(value)
-      const pathname = parsed.pathname.replace(/\/$/, '')
-      if (!pathname || pathname === '/') {
-        parsed.pathname = '/api'
-      } else if (!pathname.endsWith('/api')) {
-        parsed.pathname = `${pathname}/api`
-      } else {
-        parsed.pathname = pathname
-      }
-      parsed.search = ''
-      parsed.hash = ''
-      return parsed.toString().replace(/\/$/, '')
-    } catch {
-      return API_PROXY_BASE_URL
-    }
-  }
-
-  const normalized = value.startsWith('/') ? value : `/${value}`
-  const pathname = normalized.replace(/\/$/, '')
-  if (!pathname || pathname === '/') return API_PROXY_BASE_URL
-  if (pathname.endsWith('/api')) return pathname
-  return `${pathname}/api`
-}
+const API_BASE_URL = '/api'
 
 export function appendQuery(path, query) {
   const entries = Object.entries(query || {}).filter(([, value]) => (
@@ -68,6 +35,7 @@ export function getCookieValue(name, source) {
     if (separatorIndex <= 0) continue
     const key = entry.slice(0, separatorIndex).trim()
     if (key !== normalizedName) continue
+
     const rawValue = entry.slice(separatorIndex + 1)
     try {
       return decodeURIComponent(rawValue)
@@ -75,6 +43,7 @@ export function getCookieValue(name, source) {
       return rawValue
     }
   }
+
   return ''
 }
 
@@ -99,9 +68,9 @@ function createRequestHeaders(method, headers = {}) {
   return nextHeaders
 }
 
-async function requestJson(baseUrl, path, options = {}) {
+async function requestJson(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase()
-  const url = `${baseUrl}${appendQuery(path, options.query)}`
+  const url = `${API_BASE_URL}${appendQuery(path, options.query)}`
   const headers = createRequestHeaders(method, options.headers || {})
 
   let body = options.body
@@ -136,116 +105,95 @@ async function requestJson(baseUrl, path, options = {}) {
   return payload
 }
 
-function createControlPlaneClient(config = {}) {
-  const baseUrl = normalizeApiBaseUrl(config.baseUrl)
-
-  function request(path, options = {}) {
-    return requestJson(baseUrl, path, options)
-  }
-
-  return {
-    health: {
-      ping() {
-        return request('/health')
-      },
+const rawControlPlaneClient = {
+  health: {
+    ping() {
+      return requestJson('/health')
     },
-    dashboard: {
-      getState(query = {}) {
-        return request('/v1/dashboard/state', { query })
-      },
-      getUsageRevenue(query = {}) {
-        return request('/v1/dashboard/usage-revenue', { query })
-      },
-      updatePlacement(placementId, patch = {}) {
-        return request(`/v1/dashboard/placements/${encodeURIComponent(placementId)}`, {
-          method: 'PUT',
-          body: patch,
-        })
-      },
+  },
+  dashboard: {
+    getState(query = {}) {
+      return requestJson('/v1/dashboard/state', { query })
     },
-    credentials: {
-      listKeys(query = {}) {
-        return request('/v1/public/credentials/keys', { query })
-      },
-      createKey(payload = {}) {
-        return request('/v1/public/credentials/keys', {
-          method: 'POST',
-          body: payload,
-        })
-      },
-      rotateKey(keyId) {
-        return request(`/v1/public/credentials/keys/${encodeURIComponent(keyId)}/rotate`, {
-          method: 'POST',
-        })
-      },
-      revokeKey(keyId) {
-        return request(`/v1/public/credentials/keys/${encodeURIComponent(keyId)}/revoke`, {
-          method: 'POST',
-        })
-      },
+    getUsageRevenue(query = {}) {
+      return requestJson('/v1/dashboard/usage-revenue', { query })
     },
-    quickStart: {
-      verify(payload = {}) {
-        return request('/v1/public/quick-start/verify', {
-          method: 'POST',
-          body: payload,
-        })
-      },
+    updatePlacement(placementId, patch = {}) {
+      return requestJson(`/v1/dashboard/placements/${encodeURIComponent(placementId)}`, {
+        method: 'PUT',
+        body: patch,
+      })
     },
-    auth: {
-      register(payload = {}) {
-        return request('/v1/public/dashboard/register', {
-          method: 'POST',
-          body: payload,
-        })
-      },
-      login(payload = {}) {
-        return request('/v1/public/dashboard/login', {
-          method: 'POST',
-          body: payload,
-        })
-      },
-      me(query = {}) {
-        return request('/v1/public/dashboard/me', { query })
-      },
-      logout() {
-        return request('/v1/public/dashboard/logout', {
-          method: 'POST',
-        })
-      },
+  },
+  credentials: {
+    listKeys(query = {}) {
+      return requestJson('/v1/public/credentials/keys', { query })
     },
-    placements: {
-      list(query = {}) {
-        return request('/v1/dashboard/placements', { query })
-      },
-      create(payload = {}) {
-        return request('/v1/dashboard/placements', {
-          method: 'POST',
-          body: payload,
-        })
-      },
-      update(placementId, payload = {}) {
-        return request(`/v1/dashboard/placements/${encodeURIComponent(placementId)}`, {
-          method: 'PUT',
-          body: payload,
-        })
-      },
+    createKey(payload = {}) {
+      return requestJson('/v1/public/credentials/keys', {
+        method: 'POST',
+        body: payload,
+      })
     },
-  }
+    rotateKey(keyId) {
+      return requestJson(`/v1/public/credentials/keys/${encodeURIComponent(keyId)}/rotate`, {
+        method: 'POST',
+      })
+    },
+    revokeKey(keyId) {
+      return requestJson(`/v1/public/credentials/keys/${encodeURIComponent(keyId)}/revoke`, {
+        method: 'POST',
+      })
+    },
+  },
+  quickStart: {
+    verify(payload = {}) {
+      return requestJson('/v1/public/quick-start/verify', {
+        method: 'POST',
+        body: payload,
+      })
+    },
+  },
+  auth: {
+    register(payload = {}) {
+      return requestJson('/v1/public/dashboard/register', {
+        method: 'POST',
+        body: payload,
+      })
+    },
+    login(payload = {}) {
+      return requestJson('/v1/public/dashboard/login', {
+        method: 'POST',
+        body: payload,
+      })
+    },
+    me(query = {}) {
+      return requestJson('/v1/public/dashboard/me', { query })
+    },
+    logout() {
+      return requestJson('/v1/public/dashboard/logout', {
+        method: 'POST',
+      })
+    },
+  },
+  placements: {
+    list(query = {}) {
+      return requestJson('/v1/dashboard/placements', { query })
+    },
+    create(payload = {}) {
+      return requestJson('/v1/dashboard/placements', {
+        method: 'POST',
+        body: payload,
+      })
+    },
+    update(placementId, payload = {}) {
+      return requestJson(`/v1/dashboard/placements/${encodeURIComponent(placementId)}`, {
+        method: 'PUT',
+        body: payload,
+      })
+    },
+  },
 }
-
-const primaryClient = createControlPlaneClient({
-  baseUrl: API_BASE_URL,
-})
-
-const hasProxyFallback = (
-  API_BASE_URL !== API_PROXY_BASE_URL
-  && /^https?:\/\//i.test(API_BASE_URL)
-)
-
-const fallbackClient = hasProxyFallback
-  ? createControlPlaneClient({ baseUrl: API_PROXY_BASE_URL })
-  : null
 
 export class ControlPlaneApiError extends Error {
   constructor(message, details = {}) {
@@ -257,14 +205,9 @@ export class ControlPlaneApiError extends Error {
   }
 }
 
-function isLikelyNetworkError(error) {
-  if (error instanceof TypeError) return true
-  const message = String(error instanceof Error ? error.message : error || '').toLowerCase()
-  return message.includes('failed to fetch') || message.includes('networkerror')
-}
-
 function normalizeControlPlaneError(error) {
   if (error instanceof ControlPlaneApiError) return error
+
   const payload = error && typeof error === 'object' ? error.payload : null
   const message = payload?.error?.message
     || (error instanceof Error ? error.message : 'Request failed')
@@ -276,80 +219,73 @@ function normalizeControlPlaneError(error) {
   })
 }
 
-async function withClientCall(callFactory) {
+async function withControlPlaneCall(callFactory) {
   try {
-    return await callFactory(primaryClient)
+    return await callFactory()
   } catch (error) {
-    const shouldRetryViaProxy = fallbackClient && isLikelyNetworkError(error)
-    if (!shouldRetryViaProxy) throw normalizeControlPlaneError(error)
-
-    try {
-      return await callFactory(fallbackClient)
-    } catch (fallbackError) {
-      throw normalizeControlPlaneError(fallbackError)
-    }
+    throw normalizeControlPlaneError(error)
   }
 }
 
 export const controlPlaneClient = {
   health: {
     ping() {
-      return withClientCall((client) => client.health.ping())
+      return withControlPlaneCall(() => rawControlPlaneClient.health.ping())
     },
   },
   dashboard: {
     getState(query) {
-      return withClientCall((client) => client.dashboard.getState(query || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.dashboard.getState(query || {}))
     },
     getUsageRevenue(query) {
-      return withClientCall((client) => client.dashboard.getUsageRevenue(query || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.dashboard.getUsageRevenue(query || {}))
     },
     updatePlacement(placementId, patch) {
-      return withClientCall((client) => client.dashboard.updatePlacement(placementId, patch || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.dashboard.updatePlacement(placementId, patch || {}))
     },
   },
   credentials: {
     listKeys(query) {
-      return withClientCall((client) => client.credentials.listKeys(query || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.credentials.listKeys(query || {}))
     },
     createKey(payload) {
-      return withClientCall((client) => client.credentials.createKey(payload || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.credentials.createKey(payload || {}))
     },
     rotateKey(keyId) {
-      return withClientCall((client) => client.credentials.rotateKey(keyId))
+      return withControlPlaneCall(() => rawControlPlaneClient.credentials.rotateKey(keyId))
     },
     revokeKey(keyId) {
-      return withClientCall((client) => client.credentials.revokeKey(keyId))
+      return withControlPlaneCall(() => rawControlPlaneClient.credentials.revokeKey(keyId))
     },
   },
   quickStart: {
     verify(payload) {
-      return withClientCall((client) => client.quickStart.verify(payload || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.quickStart.verify(payload || {}))
     },
   },
   auth: {
     register(payload) {
-      return withClientCall((client) => client.auth.register(payload || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.auth.register(payload || {}))
     },
     login(payload) {
-      return withClientCall((client) => client.auth.login(payload || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.auth.login(payload || {}))
     },
     me(query) {
-      return withClientCall((client) => client.auth.me(query || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.auth.me(query || {}))
     },
     logout() {
-      return withClientCall((client) => client.auth.logout())
+      return withControlPlaneCall(() => rawControlPlaneClient.auth.logout())
     },
   },
   placements: {
     list(query) {
-      return withClientCall((client) => client.placements.list(query || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.placements.list(query || {}))
     },
     create(payload) {
-      return withClientCall((client) => client.placements.create(payload || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.placements.create(payload || {}))
     },
     update(placementId, payload) {
-      return withClientCall((client) => client.placements.update(placementId, payload || {}))
+      return withControlPlaneCall(() => rawControlPlaneClient.placements.update(placementId, payload || {}))
     },
   },
 }
