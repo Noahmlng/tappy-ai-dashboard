@@ -1,11 +1,13 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { controlPlaneClient } from '../api/control-plane-client'
 import { apiKeysState, clearRevealedSecret, createApiKey, hydrateApiKeys } from '../state/api-keys-state'
-import { authState, markOnboardingVerified } from '../state/auth-state'
+import { authState, hydrateAuthSession, markOnboardingVerified } from '../state/auth-state'
 import { scopeState } from '../state/scope-state'
 
+const router = useRouter()
 const copyState = ref('')
 const keyLoading = ref(false)
 const keyError = ref('')
@@ -103,9 +105,21 @@ async function createFirstKey() {
   clearRevealedSecret()
 
   try {
+    await hydrateAuthSession()
+    if (!authState.authenticated) {
+      keyError.value = 'Dashboard session expired. Please sign in again.'
+      await router.replace('/login?redirect=/onboarding')
+      return
+    }
+
     const result = await createApiKey({})
     if (!result?.ok) {
-      keyError.value = String(result?.error || 'Key generation failed')
+      const message = String(result?.error || 'Key generation failed')
+      if (/authentication is required|unauthorized|forbidden/i.test(message)) {
+        keyError.value = 'Dashboard authentication is required. Please sign in again.'
+      } else {
+        keyError.value = message
+      }
       return
     }
     if (revealedSecret.value) {

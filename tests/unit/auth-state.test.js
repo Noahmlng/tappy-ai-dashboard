@@ -80,4 +80,31 @@ describe('auth-state onboarding behavior', () => {
     expect(authState.onboarding.status).toBe('verified')
     expect(isOnboardingVerified()).toBe(true)
   })
+
+  it('reads dashboard access token from top-level payload for backward compatibility', async () => {
+    vi.spyOn(controlPlaneClient.auth, 'login').mockResolvedValue({
+      user: { email: 'token@example.com', accountId: 'org_token', appId: 'app_token' },
+      session: { id: 'sess_4' },
+      accessToken: 'dsh_top_level_token',
+      scope: { accountId: 'org_token', appId: 'app_token' },
+      onboarding: { status: 'verified' },
+    })
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    }))
+
+    await loginDashboardUser({
+      email: 'token@example.com',
+      password: 'password-123',
+    })
+
+    await controlPlaneClient.dashboard.getState({})
+
+    const [, options] = fetchMock.mock.calls[0]
+    expect(options.headers.Authorization).toBe('Bearer dsh_top_level_token')
+  })
 })

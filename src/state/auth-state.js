@@ -74,6 +74,21 @@ function applyScopeFromUser(user = {}, scope = {}) {
   })
 }
 
+function resolveAccessToken(payload = {}, session = {}) {
+  return pickScopeValue(
+    session?.accessToken,
+    session?.access_token,
+    session?.token,
+    payload?.accessToken,
+    payload?.access_token,
+    payload?.token,
+    payload?.sessionToken,
+    payload?.auth?.accessToken,
+    payload?.auth?.access_token,
+    payload?.auth?.token,
+  )
+}
+
 export const authState = reactive({
   user: null,
   session: null,
@@ -90,7 +105,7 @@ export const authState = reactive({
 function applyAuthPayload(payload = {}) {
   const user = payload?.user && typeof payload.user === 'object' ? payload.user : null
   const session = payload?.session && typeof payload.session === 'object' ? payload.session : null
-  const accessToken = String(session?.accessToken || session?.access_token || '').trim()
+  const accessToken = resolveAccessToken(payload, session)
   const scope = payload?.scope && typeof payload.scope === 'object' ? payload.scope : {}
   const onboarding = resolveOnboarding(payload, user || {}, scope)
 
