@@ -351,6 +351,14 @@ function makeTenantId(authorization, deps) {
   return `tenant_${digest}_${now}`
 }
 
+function makeStableTenantId(authorization = '') {
+  const digest = createHash('sha256')
+    .update(cleanText(authorization))
+    .digest('hex')
+    .slice(0, 12)
+  return digest ? `tenant_${digest}` : ''
+}
+
 function extractFirstUrl(value) {
   const input = cleanText(value)
   if (!input) return ''
@@ -964,18 +972,29 @@ function buildRuntimeRouteFailureDetails(binding = {}) {
     bindStatus,
     nextActions: bindStatus === UNBOUND_BIND_STATUS
       ? [
-        'Set MEDIATION_MANAGED_RUNTIME_BASE_URL to enable default managed routing for unbound API keys.',
+        'Ensure MEDIATION_CONTROL_PLANE_API_BASE_URL is configured (managed route is auto-derived by default).',
+        'Optionally set MEDIATION_MANAGED_RUNTIME_BASE_URL to override managed runtime origin.',
         'Or bind a custom runtime domain via /api/v1/public/runtime-domain/verify-and-bind.',
       ]
       : [
-        'Set MEDIATION_MANAGED_RUNTIME_BASE_URL to allow managed fallback for non-verified bindings.',
+        'Ensure MEDIATION_CONTROL_PLANE_API_BASE_URL is configured so managed fallback route is available.',
+        'Optionally set MEDIATION_MANAGED_RUNTIME_BASE_URL to override managed runtime origin.',
         'Run runtime-domain probe and fix the reported probe error.',
       ],
   }
 }
 
-function resolveRuntimeRoute(binding = null) {
-  const resolvedBinding = binding || null
+function resolveRuntimeRoute(binding = null, options = {}) {
+  const authorization = normalizeAuthorization(options.authorization)
+  const fallbackTenantId = makeStableTenantId(authorization)
+  const resolvedBinding = binding
+    ? makeBindingSnapshot(binding, {
+      tenantId: cleanText(binding.tenantId) || fallbackTenantId,
+    })
+    : makeBindingSnapshot({}, {
+      tenantId: fallbackTenantId,
+      bindStatus: UNBOUND_BIND_STATUS,
+    })
   const bindStatus = normalizeBindStatus(resolvedBinding?.bindStatus || UNBOUND_BIND_STATUS)
   const customerRuntimeBaseUrl = cleanText(resolvedBinding?.runtimeBaseUrl)
   const managedFallbackEnabled = shouldEnableManagedRuntimeFallback()
@@ -990,11 +1009,12 @@ function resolveRuntimeRoute(binding = null) {
       runtimeBaseUrl: customerRuntimeBaseUrl,
       customerRuntimeBaseUrl,
       bindStatus: 'verified',
+      tenantId: cleanText(resolvedBinding?.tenantId),
       binding: resolvedBinding,
     }
   }
 
-  if (resolvedBinding && bindStatus !== 'verified') {
+  if (binding && bindStatus !== 'verified') {
     if (managedRuntimeBaseUrl) {
       return {
         ok: true,
@@ -1002,6 +1022,7 @@ function resolveRuntimeRoute(binding = null) {
         runtimeBaseUrl: managedRuntimeBaseUrl,
         customerRuntimeBaseUrl: customerRuntimeBaseUrl || undefined,
         bindStatus,
+        tenantId: cleanText(resolvedBinding?.tenantId),
         binding: resolvedBinding,
       }
     }
@@ -1023,7 +1044,8 @@ function resolveRuntimeRoute(binding = null) {
       runtimeBaseUrl: managedRuntimeBaseUrl,
       customerRuntimeBaseUrl: '',
       bindStatus: UNBOUND_BIND_STATUS,
-      binding: null,
+      tenantId: cleanText(resolvedBinding?.tenantId),
+      binding: resolvedBinding,
     }
   }
 
@@ -1787,8 +1809,9 @@ async function requestRuntimeBid(input = {}) {
       return {
         ok: false,
         status,
-        errorCode: 'UPSTREAM_NO_FILL',
-        errorMessage: 'Runtime bid response returned filled=false.',
+        errorCode: cleanText(jsonPayload.reasonCode || 'UPSTREAM_NO_FILL'),
+        errorMessage: cleanText(jsonPayload.reasonMessage || 'Runtime bid response returned filled=false.'),
+        nextAction: cleanText(jsonPayload.nextAction),
         upstreamPayload: jsonPayload,
       }
     }
@@ -1837,17 +1860,20 @@ async function handleSdkBootstrap(req, res) {
   }
 
   const binding = await getRuntimeBindingByAuthorization(authorization)
-  const route = resolveRuntimeRoute(binding)
+  const route = resolveRuntimeRoute(binding, {
+    authorization,
+  })
   if (!route.ok) {
     sendJson(res, 503, buildRuntimeRouteError(route, createRequestId('req_runtime_route')))
     return
   }
 
-  const projectedBinding = binding
-    ? projectBindingForResponse(binding)
-    : projectBindingForResponse(makeBindingSnapshot({}, {
-      bindStatus: UNBOUND_BIND_STATUS,
-    }))
+  const projectedBinding = projectBindingForResponse(
+    route.binding || makeBindingSnapshot({}, {
+      tenantId: route.tenantId,
+      bindStatus: route.bindStatus,
+    }),
+  )
 
   sendJson(res, 200, {
     ...projectedBinding,
@@ -1882,7 +1908,9 @@ async function handleRuntimeBidProxy(req, res) {
   }
 
   const binding = await getRuntimeBindingByAuthorization(authorization)
-  const route = resolveRuntimeRoute(binding)
+  const route = resolveRuntimeRoute(binding, {
+    authorization,
+  })
   if (!route.ok) {
     sendJson(res, 503, buildRuntimeRouteError(route, createRequestId('req_runtime_route')))
     return
@@ -1892,6 +1920,9 @@ async function handleRuntimeBidProxy(req, res) {
   const requestBody = await readRequestBody(req)
   const headers = buildUpstreamHeaders(req)
   headers.authorization = authorization
+  headers['x-tappy-tenant-id'] = cleanText(route.tenantId)
+  headers['x-tappy-bind-status'] = cleanText(route.bindStatus)
+  headers['x-tappy-runtime-source'] = cleanText(route.runtimeSource)
 
   const targetUrl = `${cleanText(route.runtimeBaseUrl)}/api/v2/bid`
   const bidResult = await requestRuntimeBid({
@@ -1947,7 +1978,9 @@ async function handleAdBid(req, res) {
   }
 
   const binding = await getRuntimeBindingByAuthorization(authorization)
-  const route = resolveRuntimeRoute(binding)
+  const route = resolveRuntimeRoute(binding, {
+    authorization,
+  })
   if (!route.ok) {
     const noFill = buildNoFillResponse({
       traceId,
@@ -1965,6 +1998,9 @@ async function handleAdBid(req, res) {
   const requestBody = await readRequestBody(req)
   const headers = buildUpstreamHeaders(req)
   headers.authorization = authorization
+  headers['x-tappy-tenant-id'] = cleanText(route.tenantId)
+  headers['x-tappy-bind-status'] = cleanText(route.bindStatus)
+  headers['x-tappy-runtime-source'] = cleanText(route.runtimeSource)
 
   const bidResult = await requestRuntimeBid({
     deps,
@@ -1979,7 +2015,10 @@ async function handleAdBid(req, res) {
       traceId,
       reasonCode: cleanText(bidResult.errorCode || 'BID_INVALID_RESPONSE'),
       reasonMessage: cleanText(bidResult.errorMessage || 'Runtime bid response is not valid JSON.'),
-      nextAction: pickNoFillAction(route, 'Retry later or verify runtime route health in dashboard diagnostics.'),
+      nextAction: cleanText(
+        bidResult.nextAction
+        || pickNoFillAction(route, 'Retry later or verify runtime route health in dashboard diagnostics.'),
+      ),
       runtimeSource: route.runtimeSource,
     })
     console.warn('[ad-bid][no-fill]', noFill)

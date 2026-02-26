@@ -70,6 +70,7 @@ npm run build
 - `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
 - When bind status is `pending`, `sdk/bootstrap` can return `runtimeSource=managed_fallback` and a managed `runtimeBaseUrl` so SDK integration still works while custom runtime is being fixed.
 - When no binding exists, `sdk/bootstrap` can return `runtimeSource=managed_default` with `bindStatus=unbound` so key-only integration still works.
+- For `bindStatus=unbound`, bootstrap still returns a stable `tenantId` (derived from API key hash) to avoid empty-tenant integrations.
 - `/api/ad/bid` always returns `filled`; when `filled=false`, payload includes `reasonCode`, `reasonMessage`, `nextAction`, and `traceId`.
 - Dashboard navigation unlocks for both `pending` and `verified`, while a top warning banner remains for `pending`.
 - Onboarding is considered complete only when `status=verified`.

@@ -863,11 +863,13 @@ describe('dashboardApiProxyHandler', () => {
     await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
 
     expect(bootstrapRes.statusCode).toBe(200)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+    const payload = JSON.parse(bootstrapRes.body)
+    expect(payload).toMatchObject({
       runtimeSource: 'managed_default',
       runtimeBaseUrl: 'https://runtime-managed.example.com',
       bindStatus: 'unbound',
     })
+    expect(String(payload.tenantId || '')).toMatch(/^tenant_[a-f0-9]{12}$/)
   })
 
   it('returns structured route error for unbound API key when managed runtime is unavailable', async () => {
@@ -927,6 +929,11 @@ describe('dashboardApiProxyHandler', () => {
       'https://runtime-managed.example.com/api/v2/bid',
       expect.objectContaining({
         method: 'POST',
+        headers: expect.objectContaining({
+          'x-tappy-tenant-id': expect.stringMatching(/^tenant_[a-f0-9]{12}$/),
+          'x-tappy-bind-status': 'unbound',
+          'x-tappy-runtime-source': 'managed_default',
+        }),
       }),
     )
   })
