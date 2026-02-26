@@ -36,7 +36,7 @@ const placementId = 'chat_from_answer_v1'
 const rows = computed(() => (Array.isArray(apiKeysState.items) ? apiKeysState.items : []))
 const latestKey = computed(() => rows.value[0] || null)
 const revealedSecret = computed(() => String(apiKeysState.meta.lastRevealedSecret || '').trim())
-const hasAvailableKey = computed(() => rows.value.length > 0)
+const hasRuntimeApiKey = computed(() => Boolean(resolveRuntimeApiKey()))
 
 const onboardingStatus = computed(() => String(authState.onboarding.status || 'locked').toLowerCase())
 const onboardingStatusClass = computed(() => {
@@ -74,13 +74,13 @@ const runtimeBindStateLabel = computed(() => {
   return '-'
 })
 const showLiveProbeButton = computed(() => (
-  hasAvailableKey.value && (
+  hasRuntimeApiKey.value && (
     onboardingStatus.value === 'pending'
     || (runtimeStatus.value !== '' && runtimeStatus.value !== 'verified')
   )
 ))
 const showBrowserProbeButton = computed(() => {
-  if (!hasAvailableKey.value) return false
+  if (!hasRuntimeApiKey.value) return false
   if (!runtimeResult.value) return false
   if (runtimeStatus.value === 'verified') return false
   if (runtimeResult.value?.serverProbe) {
@@ -597,7 +597,7 @@ onMounted(() => {
 
     <article class="panel">
       <div class="panel-toolbar">
-        <h3>Step A: Generate runtime key</h3>
+        <h3>Step A (Optional): Generate runtime key</h3>
         <button class="button" type="button" :disabled="keyLoading || !scopeState.accountId" @click="createFirstKey">
           {{ keyLoading ? 'Generating...' : 'Generate key' }}
         </button>
@@ -668,14 +668,14 @@ onMounted(() => {
       </div>
 
       <div class="toolbar-actions">
-        <button class="button" type="button" :disabled="bindLoading || !hasAvailableKey" @click="bindRuntimeDomain">
+        <button class="button" type="button" :disabled="bindLoading || !hasRuntimeApiKey" @click="bindRuntimeDomain">
           {{ bindLoading ? 'Binding...' : 'Bind domain' }}
         </button>
         <button
           v-if="showLiveProbeButton"
           class="button button-secondary"
           type="button"
-          :disabled="liveProbeLoading || !hasAvailableKey"
+          :disabled="liveProbeLoading || !hasRuntimeApiKey"
           @click="runLiveProbe"
         >
           {{ liveProbeLoading ? 'Probing...' : 'Run live probe' }}
@@ -684,7 +684,7 @@ onMounted(() => {
           v-if="showBrowserProbeButton"
           class="button button-secondary"
           type="button"
-          :disabled="browserProbeLoading || !hasAvailableKey"
+          :disabled="browserProbeLoading || !hasRuntimeApiKey"
           @click="runBrowserProbe()"
         >
           {{ browserProbeLoading ? 'Browser probing...' : 'Run browser probe' }}
@@ -739,7 +739,7 @@ onMounted(() => {
     <article class="panel">
       <h3>Pass criteria</h3>
       <ul class="checklist">
-        <li>Runtime key generated successfully (Step A)</li>
+        <li>Runtime API key is available (generated in Step A or existing key)</li>
         <li>Domain bind returns <code>verified</code> or <code>pending</code> (Step B)</li>
         <li>Probe diagnostics show actionable code and next actions (Step B)</li>
         <li>Only <code>verified</code> marks onboarding complete; <code>pending</code> keeps warning banner</li>
