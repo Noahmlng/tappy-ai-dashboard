@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import dashboardApiProxyHandler, {
+  buildUpstreamHeaders,
   buildUpstreamUrl,
   normalizeUpstreamBaseUrl,
   resolveUpstreamBaseUrl,
@@ -21,11 +22,11 @@ function createMockRes() {
   }
 }
 
-function createMockReq(url = '/api/v1/dashboard/state', method = 'GET') {
+function createMockReq(url = '/api/v1/dashboard/state', method = 'GET', headers = {}) {
   return {
     url,
     method,
-    headers: {},
+    headers,
     [Symbol.asyncIterator]: async function* iterator() {
       yield ''
     },
@@ -65,6 +66,23 @@ describe('api proxy helpers', () => {
       MEDIATION_CONTROL_PLANE_API_PROXY_TARGET: 'http://127.0.0.1:3100',
     })).toBe('https://prod.example.com/api')
   })
+
+  it('strips browser-only cors headers and keeps server-relevant headers', () => {
+    const headers = buildUpstreamHeaders(createMockReq('/api/v1/dashboard/state', 'GET', {
+      origin: 'https://dashboard.example.com',
+      referer: 'https://dashboard.example.com/home',
+      'sec-fetch-site': 'same-origin',
+      cookie: 'dash_session=s1',
+      authorization: 'Bearer x',
+    }))
+
+    expect(headers.origin).toBeUndefined()
+    expect(headers.referer).toBeUndefined()
+    expect(headers['sec-fetch-site']).toBeUndefined()
+    expect(headers.cookie).toBe('dash_session=s1')
+    expect(headers.authorization).toBe('Bearer x')
+    expect(headers['x-forwarded-origin']).toBe('https://dashboard.example.com')
+  })
 })
 
 describe('dashboardApiProxyHandler', () => {
@@ -97,7 +115,7 @@ describe('dashboardApiProxyHandler', () => {
     process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
 
     const payload = JSON.stringify({ ok: true })
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       status: 200,
       headers: {
         getSetCookie() {
@@ -116,10 +134,20 @@ describe('dashboardApiProxyHandler', () => {
     })
 
     const res = createMockRes()
-    await dashboardApiProxyHandler(createMockReq(), res)
+    await dashboardApiProxyHandler(createMockReq('/api/v1/dashboard/state', 'GET', {
+      origin: 'https://dashboard.example.com',
+      referer: 'https://dashboard.example.com/home',
+      cookie: 'dash_session=s1',
+    }), res)
+
+    const [, requestOptions] = fetchMock.mock.calls[0]
 
     expect(res.statusCode).toBe(200)
     expect(res.headers['set-cookie']).toEqual(['dash_session=s1; Path=/', 'dash_csrf=c1; Path=/'])
     expect(res.body).toBe(payload)
+    expect(requestOptions.headers.origin).toBeUndefined()
+    expect(requestOptions.headers.referer).toBeUndefined()
+    expect(requestOptions.headers.cookie).toBe('dash_session=s1')
+    expect(requestOptions.headers['x-forwarded-origin']).toBe('https://dashboard.example.com')
   })
 })

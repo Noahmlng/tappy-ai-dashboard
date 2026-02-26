@@ -11,6 +11,17 @@ const HOP_BY_HOP_HEADERS = new Set([
   'content-length',
 ])
 
+const BROWSER_ONLY_REQUEST_HEADERS = new Set([
+  'origin',
+  'referer',
+  'sec-fetch-dest',
+  'sec-fetch-mode',
+  'sec-fetch-site',
+  'sec-fetch-user',
+  'access-control-request-method',
+  'access-control-request-headers',
+])
+
 const UPSTREAM_TIMEOUT_MS = 10_000
 
 export function normalizeUpstreamBaseUrl(rawValue) {
@@ -68,12 +79,20 @@ export function buildUpstreamUrl(req, upstreamBaseUrl) {
 
 export function buildUpstreamHeaders(req) {
   const headers = {}
+  const requestOrigin = String(req?.headers?.origin || '').trim()
+
   for (const [key, value] of Object.entries(req.headers || {})) {
     if (value === undefined || value === null) continue
     const normalizedKey = String(key || '').toLowerCase()
     if (HOP_BY_HOP_HEADERS.has(normalizedKey)) continue
+    if (BROWSER_ONLY_REQUEST_HEADERS.has(normalizedKey)) continue
     headers[key] = Array.isArray(value) ? value.join(', ') : String(value)
   }
+
+  if (requestOrigin) {
+    headers['x-forwarded-origin'] = requestOrigin
+  }
+
   return headers
 }
 
