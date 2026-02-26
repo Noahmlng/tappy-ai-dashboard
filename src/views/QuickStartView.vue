@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 import { controlPlaneClient } from '../api/control-plane-client'
 import { apiKeysState, clearRevealedSecret, createApiKey, hydrateApiKeys } from '../state/api-keys-state'
@@ -9,26 +9,74 @@ import { scopeState } from '../state/scope-state'
 const copyState = ref('')
 const keyLoading = ref(false)
 const keyError = ref('')
-const verifyLoading = ref(false)
-const verifyError = ref('')
-const verifyResult = ref(null)
 
-const runtimeApiBaseUrl = 'https://runtime.example.com'
+const bindLoading = ref(false)
+const bindError = ref('')
+const bindResult = ref(null)
+const domainInput = ref('')
+const runtimeApiKeyInput = ref('')
+
 const placementId = 'chat_from_answer_v1'
 
 const rows = computed(() => (Array.isArray(apiKeysState.items) ? apiKeysState.items : []))
 const latestKey = computed(() => rows.value[0] || null)
 const revealedSecret = computed(() => String(apiKeysState.meta.lastRevealedSecret || '').trim())
-const embeddedAppId = computed(() => String(scopeState.appId || 'app_auto_assigned').trim())
 const hasAvailableKey = computed(() => rows.value.length > 0)
 const onboardingVerified = computed(() => authState.onboarding.status === 'verified')
 
-const envSnippet = computed(() => `MEDIATION_RUNTIME_API_BASE_URL=${runtimeApiBaseUrl}\nMEDIATION_API_KEY=${revealedSecret.value || '<generated_in_step_a>'}`)
+const checks = computed(() => {
+  const source = bindResult.value?.checks
+  if (!source || typeof source !== 'object') {
+    return {
+      dnsOk: false,
+      cnameOk: false,
+      tlsOk: false,
+      connectOk: false,
+      authOk: false,
+      bidOk: false,
+      landingUrlOk: false,
+    }
+  }
+  return {
+    dnsOk: Boolean(source.dnsOk),
+    cnameOk: Boolean(source.cnameOk),
+    tlsOk: Boolean(source.tlsOk),
+    connectOk: Boolean(source.connectOk),
+    authOk: Boolean(source.authOk),
+    bidOk: Boolean(source.bidOk),
+    landingUrlOk: Boolean(source.landingUrlOk),
+  }
+})
 
-const integrationSnippet = computed(() => `const baseUrl = process.env.MEDIATION_RUNTIME_API_BASE_URL;
-const apiKey = process.env.MEDIATION_API_KEY;
-const appId = '${embeddedAppId.value}';
-const placementId = '${placementId}';
+const bindSucceeded = computed(() => {
+  const payload = bindResult.value
+  const status = String(payload?.status || '').trim().toLowerCase()
+  return status === 'verified' && checks.value.landingUrlOk
+})
+
+const onboardingStatusClass = computed(() => (
+  onboardingVerified.value ? 'meta-pill good' : 'meta-pill warn'
+))
+
+const onboardingStatusLabel = computed(() => (
+  onboardingVerified.value ? 'Verified' : 'Locked'
+))
+
+const envSnippet = computed(() => `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`)
+
+const sdkSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
+
+const bootstrapRes = await fetch('/api/v1/public/sdk/bootstrap', {
+  method: 'GET',
+  headers: {
+    'Authorization': \`Bearer ${'${apiKey}'}\`
+  }
+});
+if (!bootstrapRes.ok) throw new Error(\`bootstrap failed: ${'${bootstrapRes.status}'}\`);
+
+const bootstrap = await bootstrapRes.json();
+const baseUrl = bootstrap.runtimeBaseUrl;
+const placementId = bootstrap.placementDefaults?.placementId || '${placementId}';
 
 const bidRes = await fetch(\`${'${baseUrl}'}/api/v2/bid\`, {
   method: 'POST',
@@ -49,19 +97,18 @@ const bidRes = await fetch(\`${'${baseUrl}'}/api/v2/bid\`, {
 
 if (!bidRes.ok) throw new Error(\`v2/bid failed: ${'${bidRes.status}'}\`);
 const bidJson = await bidRes.json();
-console.log({ requestId: bidJson.requestId, message: bidJson.message });`)
+if (!bidJson.landingUrl) throw new Error('landingUrl missing in bid response');
+console.log({ requestId: bidJson.requestId, landingUrl: bidJson.landingUrl });`)
 
-const verifyEvidence = computed(() => (
-  verifyResult.value ? JSON.stringify(verifyResult.value, null, 2) : ''
+const bindEvidence = computed(() => (
+  bindResult.value ? JSON.stringify(bindResult.value, null, 2) : ''
 ))
 
-const onboardingStatusClass = computed(() => (
-  onboardingVerified.value ? 'meta-pill good' : 'meta-pill warn'
-))
-
-const onboardingStatusLabel = computed(() => (
-  onboardingVerified.value ? 'Verified' : 'Locked'
-))
+watch(revealedSecret, (value) => {
+  if (!runtimeApiKeyInput.value && value) {
+    runtimeApiKeyInput.value = value
+  }
+})
 
 async function copyText(value) {
   try {
@@ -86,6 +133,9 @@ async function createFirstKey() {
       keyError.value = String(result?.error || 'Key generation failed')
       return
     }
+    if (revealedSecret.value) {
+      runtimeApiKeyInput.value = revealedSecret.value
+    }
     await hydrateApiKeys()
   } catch (error) {
     keyError.value = error instanceof Error ? error.message : 'Key generation failed'
@@ -94,32 +144,49 @@ async function createFirstKey() {
   }
 }
 
-async function runQuickStartVerifier() {
-  verifyLoading.value = true
-  verifyError.value = ''
-  verifyResult.value = null
+async function verifyAndBindRuntimeDomain() {
+  bindLoading.value = true
+  bindError.value = ''
+  bindResult.value = null
+
+  const domain = String(domainInput.value || '').trim()
+  const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
+
+  if (!domain) {
+    bindError.value = 'Runtime domain is required.'
+    bindLoading.value = false
+    return
+  }
+  if (!runtimeApiKey) {
+    bindError.value = 'Runtime API key is required to validate Authorization.'
+    bindLoading.value = false
+    return
+  }
 
   try {
-    const verifyInput = {
-      environment: 'prod',
-      placementId,
-    }
-    const accountId = String(scopeState.accountId || '').trim()
-    const appId = String(scopeState.appId || '').trim()
-    if (accountId) verifyInput.accountId = accountId
-    if (appId) verifyInput.appId = appId
-
-    const payload = await controlPlaneClient.quickStart.verify(verifyInput)
-    verifyResult.value = payload
+    const payload = await controlPlaneClient.runtimeDomain.verifyAndBind(
+      {
+        domain,
+        placementId,
+      },
+      {
+        apiKey: runtimeApiKey,
+      },
+    )
+    bindResult.value = payload
 
     const status = String(payload?.status || '').trim().toLowerCase()
-    if (status === 'verified' || payload?.ok === true || payload?.requestId) {
+    const landingUrlOk = Boolean(payload?.checks?.landingUrlOk)
+    if (status === 'verified' && landingUrlOk) {
       markOnboardingVerified(payload?.verifiedAt)
+      return
     }
+
+    bindError.value = String(payload?.failureCode || 'Runtime domain verification failed.')
   } catch (error) {
-    verifyError.value = error instanceof Error ? error.message : 'Verifier failed'
+    bindError.value = error instanceof Error ? error.message : 'Runtime domain verification failed.'
   } finally {
-    verifyLoading.value = false
+    bindLoading.value = false
   }
 }
 
@@ -134,7 +201,7 @@ onMounted(() => {
       <div class="header-stack">
         <p class="eyebrow">Onboarding</p>
         <h2>Onboarding</h2>
-        <p class="subtitle">Complete setup in three steps.</p>
+        <p class="subtitle">Bind customer runtime domain and verify production bid path.</p>
       </div>
       <div class="header-actions">
         <span :class="onboardingStatusClass">{{ onboardingStatusLabel }}</span>
@@ -143,13 +210,12 @@ onMounted(() => {
 
     <article class="panel">
       <div class="panel-toolbar">
-        <h3>Step A: Generate key</h3>
+        <h3>Step A: Generate runtime key</h3>
         <button class="button" type="button" :disabled="keyLoading || !scopeState.accountId" @click="createFirstKey">
           {{ keyLoading ? 'Generating...' : 'Generate key' }}
         </button>
       </div>
       <p class="muted">Account <strong>{{ scopeState.accountId || '-' }}</strong></p>
-      <p class="muted">App <strong>{{ scopeState.appId || 'Auto-assigned on first key' }}</strong></p>
       <p v-if="keyError" class="muted">{{ keyError }}</p>
       <div v-if="revealedSecret" class="secret-banner">
         <strong>Secret (once)</strong>
@@ -162,46 +228,71 @@ onMounted(() => {
 
     <article class="panel">
       <div class="panel-toolbar">
-        <h3>Step B: Copy env</h3>
+        <h3>Step B: Verify and bind runtime domain</h3>
+        <button class="button" type="button" :disabled="bindLoading || !hasAvailableKey" @click="verifyAndBindRuntimeDomain">
+          {{ bindLoading ? 'Verifying...' : 'Verify and bind' }}
+        </button>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          Runtime domain
+          <input
+            v-model="domainInput"
+            class="input"
+            type="text"
+            placeholder="runtime.customer.com"
+            autocomplete="off"
+          >
+        </label>
+        <label>
+          Runtime API key
+          <input
+            v-model="runtimeApiKeyInput"
+            class="input"
+            type="password"
+            placeholder="sk_live_xxx"
+            autocomplete="off"
+          >
+        </label>
+      </div>
+      <p class="muted">The domain must resolve and CNAME to the platform runtime gateway.</p>
+      <p v-if="bindError" class="muted">{{ bindError }}</p>
+
+      <div v-if="bindResult" class="verify-evidence">
+        <p><strong>requestId:</strong> <code>{{ bindResult.requestId || '-' }}</code></p>
+        <p><strong>status:</strong> <code>{{ bindResult.status || '-' }}</code></p>
+        <p><strong>runtimeBaseUrl:</strong> <code>{{ bindResult.runtimeBaseUrl || '-' }}</code></p>
+        <p><strong>landingUrlSample:</strong> <code>{{ bindResult.landingUrlSample || '-' }}</code></p>
+        <pre class="code-block">{{ bindEvidence }}</pre>
+      </div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-toolbar">
+        <h3>Step C: Copy SDK integration</h3>
         <button class="button" type="button" @click="copyText(envSnippet)">
           Copy env
         </button>
       </div>
       <pre class="code-block">{{ envSnippet }}</pre>
-      <p class="muted">Only two env vars are required.</p>
-      <p class="muted">Embedded defaults: <code>appId={{ embeddedAppId }}</code> · <code>placementId={{ placementId }}</code></p>
+      <p class="muted">Only one env var is required: <code>MEDIATION_API_KEY</code>.</p>
 
       <div class="panel-toolbar">
-        <h3>Runtime call</h3>
-        <button class="button button-secondary" type="button" @click="copyText(integrationSnippet)">Copy snippet</button>
+        <h3>Bootstrap + bid call</h3>
+        <button class="button button-secondary" type="button" @click="copyText(sdkSnippet)">Copy snippet</button>
       </div>
-      <pre class="code-block">{{ integrationSnippet }}</pre>
+      <pre class="code-block">{{ sdkSnippet }}</pre>
       <p v-if="copyState" class="copy-note">{{ copyState }}</p>
-    </article>
-
-    <article class="panel">
-      <div class="panel-toolbar">
-        <h3>Step C: Run verify</h3>
-        <button class="button" type="button" :disabled="verifyLoading || !hasAvailableKey" @click="runQuickStartVerifier">
-          {{ verifyLoading ? 'Verifying...' : 'Run verify' }}
-        </button>
-      </div>
-      <p class="subtitle">No parameters required. Scope is resolved from your session.</p>
-      <p v-if="verifyError" class="muted">{{ verifyError }}</p>
-      <div v-if="verifyResult" class="verify-evidence">
-        <p><strong>requestId:</strong> <code>{{ verifyResult.requestId || '-' }}</code></p>
-        <p><strong>status:</strong> <code>{{ verifyResult.status || '-' }}</code></p>
-        <pre class="code-block">{{ verifyEvidence }}</pre>
-      </div>
     </article>
 
     <article class="panel">
       <h3>Pass criteria</h3>
       <ul class="checklist">
-        <li>Key generated successfully (Step A)</li>
-        <li>Env copied with only 2 variables (Step B)</li>
-        <li>Verify returns request evidence (Step C)</li>
-        <li>Navigation unlocks after verify</li>
+        <li>Runtime key generated successfully (Step A)</li>
+        <li>Runtime domain verify-and-bind returns <code>status=verified</code> (Step B)</li>
+        <li>Bid verification reports <code>landingUrlOk=true</code> (Step B)</li>
+        <li>Navigation unlocks only after Step B passes</li>
       </ul>
     </article>
   </section>

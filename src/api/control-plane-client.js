@@ -2,6 +2,10 @@ const API_BASE_URL = '/api'
 const DASHBOARD_ACCESS_TOKEN_STORAGE_KEY = 'dashboard_access_token'
 let dashboardAccessToken = ''
 
+function cleanText(value) {
+  return String(value || '').trim()
+}
+
 export function appendQuery(path, query) {
   const entries = Object.entries(query || {}).filter(([, value]) => (
     value !== undefined && value !== null && value !== ''
@@ -198,6 +202,19 @@ const rawControlPlaneClient = {
       })
     },
   },
+  runtimeDomain: {
+    verifyAndBind(payload = {}, options = {}) {
+      const runtimeApiKey = cleanText(options?.apiKey)
+      const headers = runtimeApiKey
+        ? { Authorization: `Bearer ${runtimeApiKey}` }
+        : {}
+      return requestJson('/v1/public/runtime-domain/verify-and-bind', {
+        method: 'POST',
+        headers,
+        body: payload,
+      })
+    },
+  },
   auth: {
     register(payload = {}) {
       return requestJson('/v1/public/dashboard/register', {
@@ -305,6 +322,11 @@ export const controlPlaneClient = {
   quickStart: {
     verify(payload) {
       return withControlPlaneCall(() => rawControlPlaneClient.quickStart.verify(payload || {}))
+    },
+  },
+  runtimeDomain: {
+    verifyAndBind(payload, options) {
+      return withControlPlaneCall(() => rawControlPlaneClient.runtimeDomain.verifyAndBind(payload || {}, options || {}))
     },
   },
   auth: {

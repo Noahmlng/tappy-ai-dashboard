@@ -228,6 +228,30 @@ test.describe('dashboard smoke flow', () => {
         return
       }
 
+      if (pathname === '/api/v1/public/runtime-domain/verify-and-bind' && method === 'POST') {
+        const payload = JSON.parse(request.postData() || '{}')
+        const runtimeDomain = String(payload.domain || 'runtime.customer-example.org')
+        onboardingStatus = 'verified'
+        onboardingVerifiedAt = '2026-02-26T12:00:00.000Z'
+        await json(200, {
+          status: 'verified',
+          requestId: 'req_bind_1',
+          verifiedAt: onboardingVerifiedAt,
+          runtimeBaseUrl: `https://${runtimeDomain}`,
+          landingUrlSample: 'https://ads.customer-example.org/deal-1',
+          checks: {
+            dnsOk: true,
+            cnameOk: true,
+            tlsOk: true,
+            connectOk: true,
+            authOk: true,
+            bidOk: true,
+            landingUrlOk: true,
+          },
+        })
+        return
+      }
+
       if (placementUpdatePath.test(pathname) && method === 'PUT') {
         const targetId = decodeURIComponent(pathname.split('/').pop() || '')
         const patch = JSON.parse(request.postData() || '{}')
@@ -283,7 +307,9 @@ test.describe('dashboard smoke flow', () => {
     await expect(page.getByText('Secret (once)')).toBeVisible()
     await expect(page.locator('.secret-banner code')).toHaveText('sk_live_new_secret')
 
-    await page.getByRole('button', { name: 'Run verify' }).click()
+    await page.getByLabel('Runtime domain').fill('runtime.customer-example.org')
+    await page.getByLabel('Runtime API key').fill('sk_live_new_secret')
+    await page.getByRole('button', { name: 'Verify and bind' }).click()
     await expect(page.getByText('status:')).toBeVisible()
     await expect(page.locator('.meta-pill.good')).toHaveText('Verified')
 

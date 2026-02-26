@@ -91,6 +91,24 @@ describe('control-plane-client runtime behavior', () => {
     expect(options.body).toBe('{}')
   })
 
+  it('supports runtime-domain verify with explicit runtime api key header', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ status: 'verified', requestId: 'req_bind_1' }))
+
+    await controlPlaneClient.runtimeDomain.verifyAndBind({
+      domain: 'runtime.customer-example.org',
+    }, {
+      apiKey: 'sk_runtime_secret',
+    })
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/public/runtime-domain/verify-and-bind')
+    expect(options.method).toBe('POST')
+    expect(options.headers.Authorization).toBe('Bearer sk_runtime_secret')
+    expect(options.body).toBe('{\"domain\":\"runtime.customer-example.org\"}')
+  })
+
   it('normalizes error payloads', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
       error: {
