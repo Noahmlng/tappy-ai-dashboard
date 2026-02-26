@@ -13,6 +13,7 @@ const keyError = ref('')
 const bindLoading = ref(false)
 const bindError = ref('')
 const bindResult = ref(null)
+const bootstrapResult = ref(null)
 const domainInput = ref('')
 const runtimeApiKeyInput = ref('')
 
@@ -23,36 +24,6 @@ const latestKey = computed(() => rows.value[0] || null)
 const revealedSecret = computed(() => String(apiKeysState.meta.lastRevealedSecret || '').trim())
 const hasAvailableKey = computed(() => rows.value.length > 0)
 const onboardingVerified = computed(() => authState.onboarding.status === 'verified')
-
-const checks = computed(() => {
-  const source = bindResult.value?.checks
-  if (!source || typeof source !== 'object') {
-    return {
-      dnsOk: false,
-      cnameOk: false,
-      tlsOk: false,
-      connectOk: false,
-      authOk: false,
-      bidOk: false,
-      landingUrlOk: false,
-    }
-  }
-  return {
-    dnsOk: Boolean(source.dnsOk),
-    cnameOk: Boolean(source.cnameOk),
-    tlsOk: Boolean(source.tlsOk),
-    connectOk: Boolean(source.connectOk),
-    authOk: Boolean(source.authOk),
-    bidOk: Boolean(source.bidOk),
-    landingUrlOk: Boolean(source.landingUrlOk),
-  }
-})
-
-const bindSucceeded = computed(() => {
-  const payload = bindResult.value
-  const status = String(payload?.status || '').trim().toLowerCase()
-  return status === 'verified' && checks.value.landingUrlOk
-})
 
 const onboardingStatusClass = computed(() => (
   onboardingVerified.value ? 'meta-pill good' : 'meta-pill warn'
@@ -104,6 +75,10 @@ const bindEvidence = computed(() => (
   bindResult.value ? JSON.stringify(bindResult.value, null, 2) : ''
 ))
 
+const bootstrapEvidence = computed(() => (
+  bootstrapResult.value ? JSON.stringify(bootstrapResult.value, null, 2) : ''
+))
+
 watch(revealedSecret, (value) => {
   if (!runtimeApiKeyInput.value && value) {
     runtimeApiKeyInput.value = value
@@ -148,6 +123,7 @@ async function verifyAndBindRuntimeDomain() {
   bindLoading.value = true
   bindError.value = ''
   bindResult.value = null
+  bootstrapResult.value = null
 
   const domain = String(domainInput.value || '').trim()
   const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
@@ -178,6 +154,10 @@ async function verifyAndBindRuntimeDomain() {
     const status = String(payload?.status || '').trim().toLowerCase()
     const landingUrlOk = Boolean(payload?.checks?.landingUrlOk)
     if (status === 'verified' && landingUrlOk) {
+      const bootstrap = await controlPlaneClient.sdk.bootstrap({
+        apiKey: runtimeApiKey,
+      })
+      bootstrapResult.value = bootstrap
       markOnboardingVerified(payload?.verifiedAt)
       return
     }
@@ -284,6 +264,11 @@ onMounted(() => {
       </div>
       <pre class="code-block">{{ sdkSnippet }}</pre>
       <p v-if="copyState" class="copy-note">{{ copyState }}</p>
+      <div v-if="bootstrapResult" class="verify-evidence">
+        <p><strong>bootstrap.runtimeBaseUrl:</strong> <code>{{ bootstrapResult.runtimeBaseUrl || '-' }}</code></p>
+        <p><strong>bootstrap.tenantId:</strong> <code>{{ bootstrapResult.tenantId || '-' }}</code></p>
+        <pre class="code-block">{{ bootstrapEvidence }}</pre>
+      </div>
     </article>
 
     <article class="panel">

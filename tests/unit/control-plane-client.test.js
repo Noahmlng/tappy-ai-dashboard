@@ -109,6 +109,25 @@ describe('control-plane-client runtime behavior', () => {
     expect(options.body).toBe('{\"domain\":\"runtime.customer-example.org\"}')
   })
 
+  it('supports sdk bootstrap with explicit runtime api key header', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({
+        runtimeBaseUrl: 'https://runtime.customer-example.org',
+        tenantId: 'tenant_1',
+        keyScope: 'tenant',
+      }))
+
+    await controlPlaneClient.sdk.bootstrap({
+      apiKey: 'sk_runtime_secret',
+    })
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/public/sdk/bootstrap')
+    expect(options.method).toBe('GET')
+    expect(options.headers.Authorization).toBe('Bearer sk_runtime_secret')
+  })
+
   it('normalizes error payloads', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
       error: {

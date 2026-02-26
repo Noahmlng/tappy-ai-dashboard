@@ -215,6 +215,18 @@ const rawControlPlaneClient = {
       })
     },
   },
+  sdk: {
+    bootstrap(options = {}) {
+      const runtimeApiKey = cleanText(options?.apiKey)
+      const headers = runtimeApiKey
+        ? { Authorization: `Bearer ${runtimeApiKey}` }
+        : {}
+      return requestJson('/v1/public/sdk/bootstrap', {
+        method: 'GET',
+        headers,
+      })
+    },
+  },
   auth: {
     register(payload = {}) {
       return requestJson('/v1/public/dashboard/register', {
@@ -327,6 +339,11 @@ export const controlPlaneClient = {
   runtimeDomain: {
     verifyAndBind(payload, options) {
       return withControlPlaneCall(() => rawControlPlaneClient.runtimeDomain.verifyAndBind(payload || {}, options || {}))
+    },
+  },
+  sdk: {
+    bootstrap(options) {
+      return withControlPlaneCall(() => rawControlPlaneClient.sdk.bootstrap(options || {}))
     },
   },
   auth: {

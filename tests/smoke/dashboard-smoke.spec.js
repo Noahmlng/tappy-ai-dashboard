@@ -252,6 +252,18 @@ test.describe('dashboard smoke flow', () => {
         return
       }
 
+      if (pathname === '/api/v1/public/sdk/bootstrap' && method === 'GET') {
+        await json(200, {
+          runtimeBaseUrl: 'https://runtime.customer-example.org',
+          placementDefaults: {
+            placementId: 'chat_from_answer_v1',
+          },
+          tenantId: 'tenant_smoke_1',
+          keyScope: 'tenant',
+        })
+        return
+      }
+
       if (placementUpdatePath.test(pathname) && method === 'PUT') {
         const targetId = decodeURIComponent(pathname.split('/').pop() || '')
         const patch = JSON.parse(request.postData() || '{}')
