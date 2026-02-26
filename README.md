@@ -59,10 +59,10 @@ npm run build
 - Required:
   - Generate runtime key
   - Call `POST /api/v2/bid`
-- Optional enhancement:
-  - Call `POST /api/v1/sdk/events`
-- Optional diagnostics:
-  - Call `GET /api/v1/mediation/config`
+- Not part of current direct integration path:
+  - `sdk/bootstrap`
+  - runtime bind/probe flow
+  - SDK event reporting route
 
 `No bid` with HTTP 200 is a valid business result (not an integration error).
 

@@ -26,7 +26,7 @@ const envSnippet = computed(() => (
   `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`
 ))
 
-const sdkSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
+const integrationSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
 
 const bidRes = await fetch('/api/v2/bid', {
   method: 'POST',
@@ -47,10 +47,7 @@ const bidRes = await fetch('/api/v2/bid', {
 
 if (!bidRes.ok) throw new Error(\`v2/bid failed: ${'${bidRes.status}'}\`);
 const bidJson = await bidRes.json();
-console.log({ requestId: bidJson.requestId, filled: bidJson.filled, landingUrl: bidJson.landingUrl });
-
-// Optional enhancement (not required for MVP):
-// await fetch('/api/v1/sdk/events', { method: 'POST', headers: {...}, body: JSON.stringify({...}) });`)
+console.log({ requestId: bidJson.requestId, filled: bidJson.filled, landingUrl: bidJson.landingUrl });`)
 
 const bidEvidence = computed(() => (
   bidResult.value ? JSON.stringify(bidResult.value, null, 2) : ''
@@ -248,12 +245,12 @@ onMounted(async () => {
 
     <article class="panel panel-full">
       <div class="toolbar">
-        <h2>MVP Snippet</h2>
-        <button class="button button-secondary" type="button" @click="copy(sdkSnippet)">Copy</button>
+        <h2>Direct Integration Snippet</h2>
+        <button class="button button-secondary" type="button" @click="copy(integrationSnippet)">Copy</button>
       </div>
 
-      <p class="muted">Main path is only: runtime key + <span class="mono">POST /api/v2/bid</span>. Events are optional enhancement.</p>
-      <pre>{{ sdkSnippet }}</pre>
+      <p class="muted">Main path is only: runtime key + <span class="mono">POST /api/v2/bid</span>. No bootstrap/bind/events flow.</p>
+      <pre>{{ integrationSnippet }}</pre>
 
       <div class="toolbar env-toolbar">
         <h3>.env</h3>
