@@ -240,7 +240,26 @@ function toRuntimeFailureText(payload = {}, fallback = 'Runtime probe failed.') 
     || payload?.browserProbe?.detail
     || fallback,
   ).trim()
+  const runtimeBaseUrl = String(payload?.runtimeBaseUrl || '').trim().toLowerCase()
+
+  if (code === 'ENDPOINT_404') {
+    if (runtimeBaseUrl.includes('vercel.app')) {
+      return '[ENDPOINT_404] Domain is reachable, but POST /api/v2/bid is missing. This looks like a frontend Vercel domain, not a runtime bid API.'
+    }
+    return '[ENDPOINT_404] Domain is reachable, but POST /api/v2/bid is missing.'
+  }
   return code ? `[${code}] ${detail}` : detail
+}
+
+function shouldAutoRunBrowserProbe(payload = {}) {
+  const code = String(
+    payload?.failureCode
+    || payload?.probeResult?.code
+    || payload?.serverProbe?.code
+    || '',
+  ).trim().toUpperCase()
+  if (!code) return false
+  return code === 'EGRESS_BLOCKED' || code === 'UPSTREAM_5XX'
 }
 
 async function refreshBootstrap() {
@@ -471,7 +490,7 @@ async function bindRuntimeDomain() {
 
     await applyRuntimePayload(payload)
 
-    if (String(payload?.status || '').toLowerCase() === 'pending') {
+    if (String(payload?.status || '').toLowerCase() === 'pending' && shouldAutoRunBrowserProbe(payload)) {
       await runBrowserProbe({ silent: true })
     }
   } catch (error) {
@@ -497,7 +516,7 @@ async function runLiveProbe() {
     const payload = await syncProbeWithServer({
       runBrowserProbe: false,
     })
-    if (String(payload?.status || '').toLowerCase() === 'pending') {
+    if (String(payload?.status || '').toLowerCase() === 'pending' && shouldAutoRunBrowserProbe(payload)) {
       await runBrowserProbe({ silent: true })
     }
   } catch (error) {
