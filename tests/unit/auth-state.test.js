@@ -81,7 +81,7 @@ describe('auth-state onboarding behavior', () => {
     expect(isOnboardingVerified()).toBe(true)
   })
 
-  it('reads dashboard access token from top-level payload for backward compatibility', async () => {
+  it('keeps dashboard requests on cookie auth even if top-level token exists', async () => {
     vi.spyOn(controlPlaneClient.auth, 'login').mockResolvedValue({
       user: { email: 'token@example.com', accountId: 'org_token', appId: 'app_token' },
       session: { id: 'sess_4' },
@@ -105,6 +105,6 @@ describe('auth-state onboarding behavior', () => {
     await controlPlaneClient.dashboard.getState({})
 
     const [, options] = fetchMock.mock.calls[0]
-    expect(options.headers.Authorization).toBe('Bearer dsh_top_level_token')
+    expect(options.headers.Authorization).toBeUndefined()
   })
 })

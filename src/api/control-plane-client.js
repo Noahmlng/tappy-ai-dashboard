@@ -1,6 +1,5 @@
 const API_BASE_URL = '/api'
 const DASHBOARD_ACCESS_TOKEN_STORAGE_KEY = 'dashboard_access_token'
-let dashboardAccessToken = ''
 
 function cleanText(value) {
   return String(value || '').trim()
@@ -58,27 +57,8 @@ function shouldAttachCsrfToken(method) {
   return !['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
 }
 
-function readStoredDashboardAccessToken() {
-  if (typeof window === 'undefined' || !window?.localStorage) return ''
-  try {
-    return String(window.localStorage.getItem(DASHBOARD_ACCESS_TOKEN_STORAGE_KEY) || '').trim()
-  } catch {
-    return ''
-  }
-}
-
-function getDashboardAccessToken() {
-  if (dashboardAccessToken) return dashboardAccessToken
-  const stored = readStoredDashboardAccessToken()
-  if (stored) {
-    dashboardAccessToken = stored
-  }
-  return dashboardAccessToken
-}
-
 export function setDashboardAccessToken(value = '') {
   const nextValue = String(value || '').trim()
-  dashboardAccessToken = nextValue
 
   if (typeof window === 'undefined' || !window?.localStorage) return
   try {
@@ -92,19 +72,28 @@ export function setDashboardAccessToken(value = '') {
   }
 }
 
-function createRequestHeaders(method, headers = {}) {
+function normalizeAuthMode(rawValue) {
+  const normalized = String(rawValue || '').trim().toLowerCase()
+  if (normalized === 'bearer' || normalized === 'none') return normalized
+  return 'cookie'
+}
+
+function createRequestHeaders(method, options = {}) {
+  const authMode = normalizeAuthMode(options.authMode)
+  const bearerToken = cleanText(options.bearerToken)
+  const headers = options.headers || {}
   const nextHeaders = {
     ...headers,
   }
 
-  const hasAuthorization = Object.keys(nextHeaders).some((key) => key.toLowerCase() === 'authorization')
-  if (!hasAuthorization) {
-    const accessToken = getDashboardAccessToken()
-    if (accessToken) {
-      nextHeaders.Authorization = `Bearer ${accessToken}`
+  if (authMode === 'bearer') {
+    const hasAuthorization = Object.keys(nextHeaders).some((key) => key.toLowerCase() === 'authorization')
+    if (!hasAuthorization && bearerToken) {
+      nextHeaders.Authorization = `Bearer ${bearerToken}`
     }
   }
 
+  if (authMode !== 'cookie') return nextHeaders
   if (!shouldAttachCsrfToken(method)) return nextHeaders
   const alreadySet = Object.keys(nextHeaders).some((key) => key.toLowerCase() === 'x-csrf-token')
   if (alreadySet) return nextHeaders
@@ -119,7 +108,11 @@ function createRequestHeaders(method, headers = {}) {
 async function requestJson(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase()
   const url = `${API_BASE_URL}${appendQuery(path, options.query)}`
-  const headers = createRequestHeaders(method, options.headers || {})
+  const headers = createRequestHeaders(method, {
+    headers: options.headers || {},
+    authMode: options.authMode || 'cookie',
+    bearerToken: options.bearerToken || '',
+  })
 
   let body = options.body
   if (body && typeof body === 'object' && !(body instanceof FormData)) {
@@ -205,12 +198,10 @@ const rawControlPlaneClient = {
   runtimeDomain: {
     verifyAndBind(payload = {}, options = {}) {
       const runtimeApiKey = cleanText(options?.apiKey)
-      const headers = runtimeApiKey
-        ? { Authorization: `Bearer ${runtimeApiKey}` }
-        : {}
       return requestJson('/v1/public/runtime-domain/verify-and-bind', {
         method: 'POST',
-        headers,
+        authMode: 'bearer',
+        bearerToken: runtimeApiKey,
         body: payload,
       })
     },
@@ -218,12 +209,10 @@ const rawControlPlaneClient = {
   sdk: {
     bootstrap(options = {}) {
       const runtimeApiKey = cleanText(options?.apiKey)
-      const headers = runtimeApiKey
-        ? { Authorization: `Bearer ${runtimeApiKey}` }
-        : {}
       return requestJson('/v1/public/sdk/bootstrap', {
         method: 'GET',
-        headers,
+        authMode: 'bearer',
+        bearerToken: runtimeApiKey,
       })
     },
   },

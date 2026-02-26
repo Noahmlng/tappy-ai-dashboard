@@ -99,26 +99,68 @@ async function copyText(value) {
   }, 1200)
 }
 
+function hasCookie(name) {
+  const normalizedName = String(name || '').trim()
+  if (!normalizedName || typeof document === 'undefined') return false
+  const source = String(document.cookie || '')
+  return source
+    .split(';')
+    .map((item) => item.trim())
+    .some((item) => item.startsWith(`${normalizedName}=`))
+}
+
+function resolveCreateKeyError(result) {
+  const status = Number(result?.status || 0)
+  const code = String(result?.code || '').trim().toUpperCase()
+  const message = String(result?.error || 'Key generation failed')
+
+  if (result?.requiresLogin) {
+    return '[AUTH_REQUIRED] Dashboard authentication is required. Please sign in again.'
+  }
+  if (code === 'CSRF_MISSING' || /csrf/i.test(message)) {
+    return '[CSRF_MISSING] Missing CSRF token. Refresh and try again.'
+  }
+  if (status >= 500) {
+    return '[UPSTREAM_5XX] Control plane service is unavailable. Try again shortly.'
+  }
+  return message
+}
+
+function logCreateKeyDiagnostics(result, phase) {
+  if (!import.meta.env.DEV) return
+  console.info('[generate-key:diagnostic]', {
+    phase,
+    status: Number(result?.status || 0),
+    code: String(result?.code || ''),
+    requiresLogin: Boolean(result?.requiresLogin),
+    hasDashCsrfCookie: hasCookie('dash_csrf'),
+    hasLocalStorageDashboardToken: typeof window !== 'undefined'
+      ? Boolean(window.localStorage.getItem('dashboard_access_token'))
+      : false,
+    authMode: 'cookie',
+  })
+}
+
 async function createFirstKey() {
   keyLoading.value = true
   keyError.value = ''
   clearRevealedSecret()
 
   try {
-    await hydrateAuthSession()
-    if (!authState.authenticated) {
-      keyError.value = 'Dashboard session expired. Please sign in again.'
-      await router.replace('/login?redirect=/onboarding')
-      return
+    let result = await createApiKey({})
+    if (!result?.ok && result?.requiresLogin) {
+      logCreateKeyDiagnostics(result, 'first_auth_failure')
+      await hydrateAuthSession()
+      if (authState.authenticated) {
+        result = await createApiKey({})
+      }
     }
 
-    const result = await createApiKey({})
     if (!result?.ok) {
-      const message = String(result?.error || 'Key generation failed')
-      if (/authentication is required|unauthorized|forbidden/i.test(message)) {
-        keyError.value = 'Dashboard authentication is required. Please sign in again.'
-      } else {
-        keyError.value = message
+      keyError.value = resolveCreateKeyError(result)
+      logCreateKeyDiagnostics(result, 'final_failure')
+      if (result?.requiresLogin) {
+        await router.replace('/login?redirect=/onboarding')
       }
       return
     }

@@ -55,4 +55,38 @@ describe('api-keys-state create behavior', () => {
     expect(apiKeysState.meta.lastRevealedSecret).toBe('sk_live_secret')
     expect(apiKeysState.items[0]?.keyId).toBe('key_1')
   })
+
+  it('marks requiresLogin on 401/403 create failures', async () => {
+    setScope({ accountId: 'org_auto', appId: '' })
+    vi.spyOn(controlPlaneClient.credentials, 'createKey').mockRejectedValue(
+      Object.assign(new Error('Dashboard authentication is required.'), {
+        status: 401,
+        code: 'AUTH_REQUIRED',
+      }),
+    )
+
+    const result = await createApiKey({})
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(401)
+    expect(result.code).toBe('AUTH_REQUIRED')
+    expect(result.requiresLogin).toBe(true)
+  })
+
+  it('keeps non-auth upstream failures as non-login errors', async () => {
+    setScope({ accountId: 'org_auto', appId: '' })
+    vi.spyOn(controlPlaneClient.credentials, 'createKey').mockRejectedValue(
+      Object.assign(new Error('service unavailable'), {
+        status: 503,
+        code: 'UPSTREAM_DOWN',
+      }),
+    )
+
+    const result = await createApiKey({})
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(503)
+    expect(result.code).toBe('UPSTREAM_DOWN')
+    expect(result.requiresLogin).toBe(false)
+  })
 })

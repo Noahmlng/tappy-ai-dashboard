@@ -65,7 +65,7 @@ describe('control-plane-client runtime behavior', () => {
     expect(options.headers['x-csrf-token']).toBeUndefined()
   })
 
-  it('attaches bearer token when available', async () => {
+  it('does not auto-attach bearer token for dashboard cookie auth requests', async () => {
     setDashboardAccessToken('dsh_test_token')
 
     const fetchMock = vi
@@ -75,7 +75,7 @@ describe('control-plane-client runtime behavior', () => {
     await controlPlaneClient.dashboard.getState({})
 
     const [, options] = fetchMock.mock.calls[0]
-    expect(options.headers.Authorization).toBe('Bearer dsh_test_token')
+    expect(options.headers.Authorization).toBeUndefined()
   })
 
   it('supports quick-start verify with empty payload', async () => {
@@ -106,6 +106,7 @@ describe('control-plane-client runtime behavior', () => {
     expect(url).toBe('/api/v1/public/runtime-domain/verify-and-bind')
     expect(options.method).toBe('POST')
     expect(options.headers.Authorization).toBe('Bearer sk_runtime_secret')
+    expect(options.headers['x-csrf-token']).toBeUndefined()
     expect(options.body).toBe('{\"domain\":\"runtime.customer-example.org\"}')
   })
 

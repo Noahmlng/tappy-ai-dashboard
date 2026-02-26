@@ -85,6 +85,7 @@ test.describe('dashboard smoke flow', () => {
     let onboardingStatus = 'locked'
     let onboardingVerifiedAt = ''
     let scopedAppId = ''
+    let createKeyAttempts = 0
 
     let keys = []
     let placements = [
@@ -168,6 +169,12 @@ test.describe('dashboard smoke flow', () => {
       }
 
       if (pathname === '/api/v1/public/credentials/keys' && method === 'POST') {
+        createKeyAttempts += 1
+        if (createKeyAttempts === 1) {
+          await json(401, { error: { code: 'AUTH_REQUIRED', message: 'Dashboard authentication is required.' } })
+          return
+        }
+
         scopedAppId = scopedAppId || 'app_smoke'
         const next = {
           keyId: `key_${keys.length + 1}`,
@@ -317,6 +324,7 @@ test.describe('dashboard smoke flow', () => {
     await page.getByRole('button', { name: 'Generate key' }).click()
     await expect(page.getByText('Secret (once)')).toBeVisible()
     await expect(page.locator('.secret-banner code')).toHaveText('sk_live_new_secret')
+    await expect(page.getByText('Dashboard authentication is required. Please sign in again.')).toHaveCount(0)
 
     await page.getByLabel('Runtime domain').fill('runtime.customer-example.org')
     await page.getByLabel('Runtime API key').fill('sk_live_new_secret')
@@ -340,5 +348,10 @@ test.describe('dashboard smoke flow', () => {
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)
     await expect(page.getByRole('heading', { name: 'Sign In' })).toBeVisible()
+  })
+
+  test('unauthenticated onboarding access redirects to login with return path', async ({ page }) => {
+    await page.goto('/onboarding')
+    await expect(page).toHaveURL(/\/login\?redirect=\/onboarding$/)
   })
 })

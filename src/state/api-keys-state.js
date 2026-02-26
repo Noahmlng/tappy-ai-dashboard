@@ -130,6 +130,9 @@ export async function createApiKey(input) {
     apiKeysState.meta.lastRevealedSecret = String(payload?.secret || payload?.apiKey || '')
     return { ok: true, key: normalized }
   } catch (error) {
+    const status = Number(error?.status || 0)
+    const code = String(error?.code || error?.payload?.error?.code || '')
+    const requiresLogin = status === 401 || status === 403
     apiKeysState.meta.lastRevealedSecret = ''
     apiKeysState.meta.syncMode = 'offline'
     apiKeysState.meta.error = error instanceof Error
@@ -138,6 +141,9 @@ export async function createApiKey(input) {
     return {
       ok: false,
       error: apiKeysState.meta.error,
+      status,
+      code,
+      requiresLogin,
     }
   } finally {
     apiKeysState.meta.syncing = false
