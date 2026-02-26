@@ -402,6 +402,7 @@ describe('dashboardApiProxyHandler', () => {
     expect(verifyRes.statusCode).toBe(200)
     const verifyPayload = JSON.parse(verifyRes.body)
     expect(verifyPayload.status).toBe('verified')
+    expect(verifyPayload.bindStage).toBe('bound')
     expect(verifyPayload.runtimeBaseUrl).toBe('https://runtime.customer-example.org')
     expect(verifyPayload.checks).toMatchObject({
       dnsOk: true,
@@ -422,6 +423,7 @@ describe('dashboardApiProxyHandler', () => {
     expect(JSON.parse(bootstrapRes.body)).toMatchObject({
       runtimeBaseUrl: 'https://runtime.customer-example.org',
       keyScope: 'tenant',
+      bindStatus: 'verified',
       placementDefaults: {
         placementId: 'chat_from_answer_v1',
       },
@@ -463,6 +465,158 @@ describe('dashboardApiProxyHandler', () => {
       authOk: true,
       bidOk: true,
       landingUrlOk: true,
+    })
+  })
+
+  it('binds domain as pending when runtime probe is network blocked', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue([]),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockRejectedValue(new Error('socket hang up')),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_pending',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'simple-chatbot-phi.vercel.app',
+      placementId: 'chat_from_answer_v1',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+
+    expect(verifyRes.statusCode).toBe(200)
+    expect(JSON.parse(verifyRes.body)).toMatchObject({
+      status: 'pending',
+      bindStage: 'probe_failed',
+      failureCode: 'EGRESS_BLOCKED',
+      legacyCode: 'NETWORK_BLOCKED',
+      checks: {
+        dnsOk: true,
+        tlsOk: true,
+        connectOk: true,
+        authOk: false,
+        bidOk: false,
+        landingUrlOk: false,
+      },
+    })
+  })
+
+  it('supports runtime-domain probe and classifies server fail + browser pass as egress blocked', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
+        requestId: 'req_seed',
+        landingUrl: 'https://ads.customer.example/seed',
+      })),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_probe_1',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'runtime.customer-probe.org',
+      placementId: 'chat_from_answer_v1',
+    }
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body).status).toBe('verified')
+
+    setRuntimeDepsForTests({
+      fetch: vi.fn().mockRejectedValue(new Error('network blocked')),
+    })
+
+    const probeReq = createMockReq('/api/v1/public/runtime-domain/probe', 'POST', {
+      authorization: 'Bearer sk_runtime_probe_1',
+      'content-type': 'application/json',
+    })
+    probeReq.body = {
+      runBrowserProbe: true,
+      browserProbe: {
+        ok: true,
+        code: 'VERIFIED',
+        httpStatus: 200,
+        landingUrl: 'https://ads.customer.example/browser',
+      },
+    }
+    const probeRes = createMockRes()
+    await dashboardApiProxyHandler(probeReq, probeRes)
+
+    expect(probeRes.statusCode).toBe(200)
+    const payload = JSON.parse(probeRes.body)
+    expect(payload).toMatchObject({
+      finalStatus: 'pending',
+      failureCode: 'EGRESS_BLOCKED',
+      legacyCode: 'NETWORK_BLOCKED',
+      serverProbe: {
+        source: 'server',
+        ok: false,
+        code: 'EGRESS_BLOCKED',
+      },
+      browserProbe: {
+        source: 'browser',
+        ok: true,
+      },
+    })
+  })
+
+  it('upgrades pending binding to verified when runtime-domain probe succeeds', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue([]),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockRejectedValue(new Error('network blocked')),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_probe_2',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'runtime.customer-upgrade.org',
+    }
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body).status).toBe('pending')
+
+    setRuntimeDepsForTests({
+      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
+        requestId: 'req_probe_ok',
+        link: 'https://ads.customer.example/upgraded',
+      })),
+    })
+
+    const probeReq = createMockReq('/api/v1/public/runtime-domain/probe', 'POST', {
+      authorization: 'Bearer sk_runtime_probe_2',
+      'content-type': 'application/json',
+    })
+    probeReq.body = {}
+    const probeRes = createMockRes()
+    await dashboardApiProxyHandler(probeReq, probeRes)
+    expect(JSON.parse(probeRes.body)).toMatchObject({
+      finalStatus: 'verified',
+      status: 'verified',
+    })
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_probe_2',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      bindStatus: 'verified',
     })
   })
 

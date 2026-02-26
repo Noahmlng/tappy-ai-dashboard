@@ -34,6 +34,9 @@ const DEFAULT_KEY_NAME = 'runtime-prod'
 const DEFAULT_RUNTIME_GATEWAY_HOST = 'runtime-gateway.tappy.ai'
 const RUNTIME_VERIFY_TIMEOUT_MS = 8_000
 const URL_IN_TEXT_RE = /(https?:\/\/[^\s"'<>]+)/i
+const PROBE_HEADERS_MAX_KEYS = 2
+const PROBE_HEADERS_MAX_BYTES = 2_048
+const DEFAULT_BIND_STATUS = 'pending'
 
 const runtimeDomainBindings = new Map()
 let runtimeDepsOverride = null
@@ -65,6 +68,169 @@ export function setRuntimeDepsForTests(overrides = null) {
 
 export function clearRuntimeDomainBindingsForTests() {
   runtimeDomainBindings.clear()
+}
+
+function isAllowedProbeHeader(headerName) {
+  const normalized = normalizeHost(headerName)
+  if (!normalized) return false
+  if (HOP_BY_HOP_HEADERS.has(normalized)) return false
+  if (normalized === 'content-length') return false
+  if (normalized === 'host') return false
+  return normalized === 'authorization'
+    || normalized.startsWith('x-')
+    || normalized.startsWith('cf-')
+}
+
+function sanitizeProbeHeaders(source = {}) {
+  const input = source && typeof source === 'object' && !Array.isArray(source)
+    ? source
+    : {}
+  const entries = []
+  let bytes = 0
+
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    const key = cleanText(rawKey).toLowerCase()
+    if (!key) continue
+
+    if (!isAllowedProbeHeader(key)) {
+      throw createRuntimeError('PROBE_HEADERS_INVALID', `Probe header "${key}" is not allowed.`)
+    }
+
+    const value = cleanText(rawValue)
+    if (!value) continue
+    bytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(value, 'utf8')
+    entries.push([key, value])
+  }
+
+  if (entries.length > PROBE_HEADERS_MAX_KEYS) {
+    throw createRuntimeError('PROBE_HEADERS_INVALID', `Only ${PROBE_HEADERS_MAX_KEYS} probe headers are allowed.`)
+  }
+  if (bytes > PROBE_HEADERS_MAX_BYTES) {
+    throw createRuntimeError('PROBE_HEADERS_INVALID', 'Probe headers exceed size limit.')
+  }
+
+  return Object.fromEntries(entries)
+}
+
+function encodeProbeHeaders(headers = {}) {
+  const payload = JSON.stringify(headers || {})
+  return Buffer.from(payload, 'utf8').toString('base64')
+}
+
+function decodeProbeHeaders(encodedValue = '') {
+  const encoded = cleanText(encodedValue)
+  if (!encoded) return {}
+  try {
+    const raw = Buffer.from(encoded, 'base64').toString('utf8')
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function makeLegacyProbeCode(code = '') {
+  const normalized = cleanText(code).toUpperCase()
+  if (!normalized) return ''
+  if (normalized === 'AUTH_401_403') return 'AUTH_FORBIDDEN'
+  if (['BID_INVALID_RESPONSE_JSON', 'LANDING_URL_MISSING'].includes(normalized)) {
+    return 'BID_INVALID_RESPONSE'
+  }
+  if ([
+    'EGRESS_BLOCKED',
+    'ENDPOINT_404',
+    'METHOD_405',
+    'UPSTREAM_5XX',
+  ].includes(normalized)) {
+    return 'NETWORK_BLOCKED'
+  }
+  return normalized
+}
+
+function buildNextActions(code = '') {
+  const normalized = cleanText(code).toUpperCase()
+  switch (normalized) {
+    case 'ENDPOINT_404':
+      return [
+        'Ensure runtime domain exposes POST /api/v2/bid.',
+        'Confirm deployment routes include /api/v2/bid.',
+      ]
+    case 'METHOD_405':
+      return [
+        'Allow POST method on /api/v2/bid.',
+        'Verify platform middleware does not block non-GET requests.',
+      ]
+    case 'AUTH_401_403':
+      return [
+        'Verify Runtime API key is active and has bid permission.',
+        'Check Authorization header format: Bearer <MEDIATION_API_KEY>.',
+      ]
+    case 'UPSTREAM_5XX':
+      return [
+        'Inspect runtime server logs for /api/v2/bid failures.',
+        'Retry probe after runtime service health returns to normal.',
+      ]
+    case 'BID_INVALID_RESPONSE_JSON':
+      return [
+        'Return valid JSON body from /api/v2/bid.',
+        'Set response Content-Type to application/json.',
+      ]
+    case 'LANDING_URL_MISSING':
+      return [
+        'Include landingUrl in /api/v2/bid response.',
+        'Or provide url/link so control plane can normalize it.',
+      ]
+    case 'EGRESS_BLOCKED':
+      return [
+        'Run Browser Probe to verify user-side reachability.',
+        'If Browser Probe passes, allow-list control-plane egress IPs or relax edge protection.',
+      ]
+    case 'PROBE_HEADERS_INVALID':
+      return [
+        'Use up to 2 probe headers with allowed prefixes (x- or cf- or authorization).',
+        'Remove host/content-length/connection related headers.',
+      ]
+    default:
+      return [
+        'Retry probe and inspect runtime logs.',
+        'Confirm /api/v2/bid accepts POST and returns a usable landing URL.',
+      ]
+  }
+}
+
+function createProbeResult(source, input = {}) {
+  return {
+    source: cleanText(source) || 'server',
+    ok: Boolean(input.ok),
+    code: cleanText(input.code) || 'EGRESS_BLOCKED',
+    httpStatus: Number(input.httpStatus || 0) || undefined,
+    detail: cleanText(input.detail),
+    landingUrl: cleanText(input.landingUrl),
+  }
+}
+
+function classifyHttpProbeError(statusCode) {
+  const status = Number(statusCode || 0)
+  if (status === 404) return 'ENDPOINT_404'
+  if (status === 405) return 'METHOD_405'
+  if (status === 401 || status === 403) return 'AUTH_401_403'
+  if (status >= 500) return 'UPSTREAM_5XX'
+  return 'EGRESS_BLOCKED'
+}
+
+function normalizeBrowserProbePayload(input = {}) {
+  const source = input && typeof input === 'object' && !Array.isArray(input)
+    ? input
+    : {}
+  return createProbeResult('browser', {
+    ok: source.ok === true,
+    code: cleanText(source.code) || 'EGRESS_BLOCKED',
+    httpStatus: Number(source.httpStatus || 0) || 0,
+    detail: cleanText(source.detail),
+    landingUrl: cleanText(source.landingUrl),
+  })
 }
 
 function normalizeHost(value) {
@@ -233,9 +399,12 @@ function createChecks() {
   }
 }
 
-function createRuntimeError(failureCode, message = '') {
+function createRuntimeError(failureCode, message = '', details = {}) {
   const error = new Error(message || failureCode)
   error.failureCode = failureCode
+  if (details && typeof details === 'object') {
+    Object.assign(error, details)
+  }
   return error
 }
 
@@ -337,43 +506,137 @@ async function readJsonResponse(response) {
   }
 }
 
-async function probeBid(runtimeBaseUrl, placementId, authorization, deps) {
+async function probeBid(runtimeBaseUrl, placementId, authorization, deps, options = {}) {
+  const probeHeaders = sanitizeProbeHeaders(options.probeHeaders || {})
+  const outboundHeaders = {
+    ...probeHeaders,
+    authorization,
+    'content-type': 'application/json; charset=utf-8',
+  }
   const probeResponse = await deps.fetch(`${runtimeBaseUrl}/api/v2/bid`, {
     method: 'POST',
-    headers: {
-      authorization,
-      'content-type': 'application/json; charset=utf-8',
-    },
+    headers: outboundHeaders,
     body: JSON.stringify(createBidProbePayload(placementId)),
   }).catch((error) => {
     if (error?.failureCode) throw error
-    throw createRuntimeError('NETWORK_BLOCKED', 'Runtime bid probe failed.')
+    throw createRuntimeError('EGRESS_BLOCKED', 'Runtime bid probe failed.', {
+      detail: error instanceof Error ? error.message : 'Network failure',
+      legacyCode: 'NETWORK_BLOCKED',
+    })
   })
 
   if (!probeResponse) {
-    throw createRuntimeError('NETWORK_BLOCKED', 'Runtime bid probe failed.')
+    throw createRuntimeError('EGRESS_BLOCKED', 'Runtime bid probe failed.', {
+      legacyCode: 'NETWORK_BLOCKED',
+    })
   }
 
-  if (probeResponse.status === 401 || probeResponse.status === 403) {
-    throw createRuntimeError('AUTH_FORBIDDEN', 'Authorization rejected by runtime.')
-  }
   if (!probeResponse.ok) {
-    throw createRuntimeError('NETWORK_BLOCKED', `Runtime bid probe failed with status ${probeResponse.status}.`)
+    const code = classifyHttpProbeError(probeResponse.status)
+    throw createRuntimeError(code, `Runtime bid probe failed with status ${probeResponse.status}.`, {
+      httpStatus: Number(probeResponse.status || 0),
+      legacyCode: makeLegacyProbeCode(code),
+    })
   }
 
   const parsed = await readJsonResponse(probeResponse)
   if (!parsed || typeof parsed !== 'object') {
-    throw createRuntimeError('BID_INVALID_RESPONSE', 'Runtime bid response is not JSON.')
+    throw createRuntimeError('BID_INVALID_RESPONSE_JSON', 'Runtime bid response is not JSON.', {
+      httpStatus: Number(probeResponse.status || 0),
+      legacyCode: 'BID_INVALID_RESPONSE',
+    })
   }
 
   const { landingUrl, payload } = normalizeBidPayload(parsed)
   if (!landingUrl) {
-    throw createRuntimeError('BID_INVALID_RESPONSE', 'Runtime bid response does not contain landingUrl.')
+    throw createRuntimeError('LANDING_URL_MISSING', 'Runtime bid response does not contain landingUrl.', {
+      httpStatus: Number(probeResponse.status || 0),
+      legacyCode: 'BID_INVALID_RESPONSE',
+    })
   }
 
-  return {
+  return createProbeResult('server', {
+    ok: true,
+    code: 'VERIFIED',
+    httpStatus: Number(probeResponse.status || 200),
+    detail: 'Runtime bid probe succeeded.',
     landingUrl,
     payload,
+  })
+}
+
+function toProbeFailureResult(error, source = 'server') {
+  const code = cleanText(error?.failureCode || '').toUpperCase() || 'EGRESS_BLOCKED'
+  return createProbeResult(source, {
+    ok: false,
+    code,
+    httpStatus: Number(error?.httpStatus || 0),
+    detail: cleanText(error?.message || error?.detail || 'Probe failed'),
+  })
+}
+
+function withProbeCompatibility(payload = {}) {
+  const probeCode = cleanText(payload?.failureCode || payload?.probeResult?.code || '')
+  const legacyCode = cleanText(payload?.legacyCode || makeLegacyProbeCode(probeCode))
+  if (!legacyCode || legacyCode === probeCode) {
+    return payload
+  }
+  return {
+    ...payload,
+    legacyCode,
+  }
+}
+
+function computeProbeFinalStatus(serverProbe, browserProbe) {
+  const serverOk = Boolean(serverProbe?.ok)
+  const browserOk = Boolean(browserProbe?.ok)
+
+  if (serverOk) {
+    return {
+      status: 'verified',
+      code: 'VERIFIED',
+      source: 'server',
+    }
+  }
+  if (!serverOk && browserOk) {
+    return {
+      status: 'pending',
+      code: 'EGRESS_BLOCKED',
+      source: 'server',
+    }
+  }
+  return {
+    status: 'pending',
+    code: cleanText(serverProbe?.code || 'EGRESS_BLOCKED'),
+    source: 'server',
+  }
+}
+
+function makeBindingSnapshot(existing = {}, patch = {}) {
+  return {
+    tenantId: cleanText(patch.tenantId || existing.tenantId),
+    runtimeBaseUrl: cleanText(patch.runtimeBaseUrl || existing.runtimeBaseUrl),
+    placementId: cleanText(patch.placementId || existing.placementId || DEFAULT_PLACEMENT_ID),
+    keyScope: 'tenant',
+    bindStatus: cleanText(patch.bindStatus || existing.bindStatus || DEFAULT_BIND_STATUS),
+    verifiedAt: cleanText(patch.verifiedAt ?? existing.verifiedAt),
+    lastProbeAt: cleanText(patch.lastProbeAt ?? existing.lastProbeAt),
+    lastProbeCode: cleanText(patch.lastProbeCode ?? existing.lastProbeCode),
+    lastProbeHttpStatus: Number(patch.lastProbeHttpStatus ?? existing.lastProbeHttpStatus ?? 0) || 0,
+    probeHeadersEncrypted: cleanText(patch.probeHeadersEncrypted ?? existing.probeHeadersEncrypted),
+    probeDiagnostics: patch.probeDiagnostics || existing.probeDiagnostics || null,
+  }
+}
+
+function projectBindingForResponse(binding = {}) {
+  return {
+    tenantId: binding.tenantId,
+    keyScope: binding.keyScope || 'tenant',
+    runtimeBaseUrl: binding.runtimeBaseUrl,
+    bindStatus: binding.bindStatus || DEFAULT_BIND_STATUS,
+    placementDefaults: {
+      placementId: binding.placementId || DEFAULT_PLACEMENT_ID,
+    },
   }
 }
 
@@ -759,6 +1022,40 @@ function shouldRequireGatewayCname(env = process.env) {
   return cleanText(env?.MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME) === '1'
 }
 
+function applyProbeStatusToChecks(checks, probeResult) {
+  const next = {
+    ...(checks || createChecks()),
+  }
+  if (!probeResult || typeof probeResult !== 'object') return next
+  const code = cleanText(probeResult.code).toUpperCase()
+  if (probeResult.ok) {
+    next.authOk = true
+    next.bidOk = true
+    next.landingUrlOk = Boolean(cleanText(probeResult.landingUrl))
+    return next
+  }
+  if (code === 'AUTH_401_403') {
+    next.authOk = false
+  }
+  next.bidOk = false
+  next.landingUrlOk = false
+  return next
+}
+
+async function runServerRuntimeProbe(input = {}) {
+  const deps = input.deps || getRuntimeDeps()
+  const probe = await probeBid(
+    input.runtimeBaseUrl,
+    input.placementId,
+    input.authorization,
+    deps,
+    {
+      probeHeaders: input.probeHeaders || {},
+    },
+  )
+  return createProbeResult('server', probe)
+}
+
 async function handleRuntimeDomainVerifyAndBind(req, res) {
   const requestId = createRequestId('req_runtime_bind')
   const checks = createChecks()
@@ -770,26 +1067,61 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
   const placementId = cleanText(payload?.placementId) || DEFAULT_PLACEMENT_ID
   const normalizedDomain = normalizeRuntimeDomain(payload?.domain)
   const runtimeBaseUrl = normalizedDomain.runtimeBaseUrl || ''
+  const tenantId = makeTenantId(authorization || 'runtime', deps)
 
-  if (!authorization) {
-    sendJson(res, 200, {
+  let probeHeaders = {}
+  try {
+    probeHeaders = sanitizeProbeHeaders(payload?.probeHeaders || {})
+  } catch (error) {
+    const probeResult = toProbeFailureResult(error, 'server')
+    sendJson(res, 200, withProbeCompatibility({
       status: 'failed',
+      bindStage: 'rejected',
       runtimeBaseUrl,
       checks,
       requestId,
-      failureCode: 'AUTH_FORBIDDEN',
+      failureCode: probeResult.code,
+      probeResult,
+      nextActions: buildNextActions(probeResult.code),
+    }))
+    return
+  }
+
+  if (!authorization) {
+    const probeResult = createProbeResult('server', {
+      ok: false,
+      code: 'AUTH_401_403',
+      detail: 'Authorization header is required.',
     })
+    sendJson(res, 200, withProbeCompatibility({
+      status: 'failed',
+      bindStage: 'rejected',
+      runtimeBaseUrl,
+      checks,
+      requestId,
+      failureCode: probeResult.code,
+      probeResult,
+      nextActions: buildNextActions(probeResult.code),
+    }))
     return
   }
 
   if (!normalizedDomain.ok) {
-    sendJson(res, 200, {
+    const probeResult = createProbeResult('server', {
+      ok: false,
+      code: normalizedDomain.failureCode || 'CNAME_MISMATCH',
+      detail: 'Runtime domain is invalid.',
+    })
+    sendJson(res, 200, withProbeCompatibility({
       status: 'failed',
+      bindStage: 'rejected',
       runtimeBaseUrl,
       checks,
       requestId,
-      failureCode: normalizedDomain.failureCode || 'CNAME_MISMATCH',
-    })
+      failureCode: probeResult.code,
+      probeResult,
+      nextActions: buildNextActions(probeResult.code),
+    }))
     return
   }
 
@@ -809,45 +1141,228 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
     checks.tlsOk = tlsChecks.tlsOk
     checks.connectOk = tlsChecks.connectOk
 
-    const probe = await probeBid(runtimeBaseUrl, placementId, authorization, deps)
-    checks.authOk = true
-    checks.bidOk = true
-    checks.landingUrlOk = Boolean(probe.landingUrl)
-
-    const tenantId = makeTenantId(authorization, deps)
-    setBoundRuntimeByAuthorization(authorization, {
-      tenantId,
+    const existingBinding = getBoundRuntimeByAuthorization(authorization) || {}
+    const pendingBinding = makeBindingSnapshot(existingBinding, {
+      tenantId: existingBinding.tenantId || tenantId,
       runtimeBaseUrl,
       placementId,
-      keyScope: 'tenant',
-      verifiedAt: new Date().toISOString(),
+      bindStatus: 'pending',
+      verifiedAt: '',
+      lastProbeAt: new Date().toISOString(),
+      probeHeadersEncrypted: encodeProbeHeaders(probeHeaders),
     })
+    setBoundRuntimeByAuthorization(authorization, pendingBinding)
 
-    sendJson(res, 200, {
-      status: 'verified',
-      runtimeBaseUrl,
-      checks,
-      requestId,
-      landingUrlSample: probe.landingUrl,
-      tenantId,
-      keyScope: 'tenant',
-      placementDefaults: {
+    let serverProbe
+    try {
+      serverProbe = await runServerRuntimeProbe({
+        runtimeBaseUrl,
         placementId,
+        authorization,
+        deps,
+        probeHeaders,
+      })
+    } catch (error) {
+      serverProbe = toProbeFailureResult(error, 'server')
+      const updatedPendingBinding = makeBindingSnapshot(pendingBinding, {
+        bindStatus: 'pending',
+        lastProbeAt: new Date().toISOString(),
+        lastProbeCode: serverProbe.code,
+        lastProbeHttpStatus: Number(serverProbe.httpStatus || 0),
+        probeDiagnostics: {
+          serverProbe,
+        },
+      })
+      setBoundRuntimeByAuthorization(authorization, updatedPendingBinding)
+      const checksWithProbe = applyProbeStatusToChecks(checks, serverProbe)
+      sendJson(res, 200, withProbeCompatibility({
+        status: 'pending',
+        bindStage: 'probe_failed',
+        runtimeBaseUrl,
+        checks: checksWithProbe,
+        requestId,
+        failureCode: serverProbe.code,
+        probeResult: serverProbe,
+        nextActions: buildNextActions(serverProbe.code),
+        ...projectBindingForResponse(updatedPendingBinding),
+      }))
+      return
+    }
+
+    const checksWithProbe = applyProbeStatusToChecks(checks, serverProbe)
+    const verifiedBinding = makeBindingSnapshot(pendingBinding, {
+      bindStatus: 'verified',
+      verifiedAt: new Date().toISOString(),
+      lastProbeAt: new Date().toISOString(),
+      lastProbeCode: serverProbe.code,
+      lastProbeHttpStatus: Number(serverProbe.httpStatus || 0),
+      probeDiagnostics: {
+        serverProbe,
       },
     })
-  } catch (error) {
-    const failureCode = cleanText(error?.failureCode) || 'NETWORK_BLOCKED'
-    if (failureCode === 'AUTH_FORBIDDEN') {
-      checks.authOk = false
-    }
-    sendJson(res, 200, {
-      status: 'failed',
+    setBoundRuntimeByAuthorization(authorization, verifiedBinding)
+
+    sendJson(res, 200, withProbeCompatibility({
+      status: 'verified',
+      bindStage: 'bound',
       runtimeBaseUrl,
-      checks,
+      checks: checksWithProbe,
       requestId,
-      failureCode,
-    })
+      landingUrlSample: serverProbe.landingUrl,
+      probeResult: serverProbe,
+      nextActions: [],
+      ...projectBindingForResponse(verifiedBinding),
+    }))
+  } catch (error) {
+    const probeResult = toProbeFailureResult(error, 'server')
+    const checksWithProbe = applyProbeStatusToChecks(checks, probeResult)
+    sendJson(res, 200, withProbeCompatibility({
+      status: 'failed',
+      bindStage: 'rejected',
+      runtimeBaseUrl,
+      checks: checksWithProbe,
+      requestId,
+      failureCode: probeResult.code,
+      probeResult,
+      nextActions: buildNextActions(probeResult.code),
+      ...projectBindingForResponse(makeBindingSnapshot({}, {
+        tenantId,
+        runtimeBaseUrl,
+        placementId,
+        bindStatus: 'failed',
+      })),
+    }))
   }
+}
+
+async function handleRuntimeDomainProbe(req, res) {
+  const requestId = createRequestId('req_runtime_probe')
+  const deps = getRuntimeDeps()
+  const requestBody = await readRequestBody(req)
+  const payload = parseJsonBody(requestBody) || {}
+  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
+  if (!authorization) {
+    sendJson(res, 401, {
+      error: {
+        code: 'AUTH_401_403',
+        message: 'Authorization header is required.',
+      },
+    })
+    return
+  }
+
+  const binding = getBoundRuntimeByAuthorization(authorization) || {}
+  const normalizedDomain = cleanText(payload?.domain)
+    ? normalizeRuntimeDomain(payload?.domain)
+    : null
+  if (normalizedDomain && !normalizedDomain.ok) {
+    sendJson(res, 200, withProbeCompatibility({
+      status: 'failed',
+      finalStatus: 'failed',
+      requestId,
+      failureCode: normalizedDomain.failureCode || 'CNAME_MISMATCH',
+      serverProbe: createProbeResult('server', {
+        ok: false,
+        code: normalizedDomain.failureCode || 'CNAME_MISMATCH',
+        detail: 'Runtime domain is invalid.',
+      }),
+      nextActions: buildNextActions(normalizedDomain.failureCode || 'CNAME_MISMATCH'),
+    }))
+    return
+  }
+
+  const runtimeBaseUrl = normalizedDomain?.runtimeBaseUrl || cleanText(binding.runtimeBaseUrl)
+  if (!runtimeBaseUrl) {
+    sendJson(res, 404, {
+      error: {
+        code: 'RUNTIME_DOMAIN_NOT_BOUND',
+        message: 'Runtime domain is not bound for this API key.',
+      },
+    })
+    return
+  }
+
+  const placementId = cleanText(payload?.placementId || binding.placementId || DEFAULT_PLACEMENT_ID)
+  let probeHeaders = {}
+  try {
+    const incomingProbeHeaders = payload?.probeHeaders
+    if (incomingProbeHeaders && typeof incomingProbeHeaders === 'object') {
+      probeHeaders = sanitizeProbeHeaders(incomingProbeHeaders)
+    } else {
+      probeHeaders = sanitizeProbeHeaders(decodeProbeHeaders(binding.probeHeadersEncrypted))
+    }
+  } catch (error) {
+    const failedProbe = toProbeFailureResult(error, 'server')
+    sendJson(res, 200, withProbeCompatibility({
+      status: 'failed',
+      finalStatus: 'failed',
+      runtimeBaseUrl,
+      requestId,
+      failureCode: failedProbe.code,
+      serverProbe: failedProbe,
+      nextActions: buildNextActions(failedProbe.code),
+    }))
+    return
+  }
+
+  let serverProbe
+  try {
+    serverProbe = await runServerRuntimeProbe({
+      runtimeBaseUrl,
+      placementId,
+      authorization,
+      deps,
+      probeHeaders,
+    })
+  } catch (error) {
+    serverProbe = toProbeFailureResult(error, 'server')
+  }
+
+  const browserProbe = payload?.runBrowserProbe === true
+    ? normalizeBrowserProbePayload(payload?.browserProbe || {})
+    : null
+
+  const decision = computeProbeFinalStatus(serverProbe, browserProbe)
+  const failureCode = decision.status === 'verified' ? '' : decision.code
+  const tenantId = cleanText(binding.tenantId) || makeTenantId(authorization, deps)
+  const nextBinding = makeBindingSnapshot(binding, {
+    tenantId,
+    runtimeBaseUrl,
+    placementId,
+    bindStatus: decision.status === 'verified' ? 'verified' : 'pending',
+    verifiedAt: decision.status === 'verified' ? new Date().toISOString() : '',
+    lastProbeAt: new Date().toISOString(),
+    lastProbeCode: failureCode || 'VERIFIED',
+    lastProbeHttpStatus: Number(serverProbe.httpStatus || browserProbe?.httpStatus || 0),
+    probeHeadersEncrypted: encodeProbeHeaders(probeHeaders),
+    probeDiagnostics: {
+      serverProbe,
+      browserProbe,
+      finalCode: failureCode || 'VERIFIED',
+    },
+  })
+  setBoundRuntimeByAuthorization(authorization, nextBinding)
+
+  const response = withProbeCompatibility({
+    status: decision.status,
+    finalStatus: decision.status,
+    requestId,
+    runtimeBaseUrl,
+    failureCode: failureCode || undefined,
+    probeResult: decision.status === 'verified'
+      ? serverProbe
+      : createProbeResult('server', {
+        ok: false,
+        code: failureCode,
+        httpStatus: Number(serverProbe.httpStatus || 0),
+        detail: serverProbe.detail,
+      }),
+    serverProbe,
+    browserProbe: browserProbe || undefined,
+    nextActions: failureCode ? buildNextActions(failureCode) : [],
+    ...projectBindingForResponse(nextBinding),
+  })
+  sendJson(res, 200, response)
 }
 
 function handleSdkBootstrap(req, res) {
@@ -874,12 +1389,9 @@ function handleSdkBootstrap(req, res) {
   }
 
   sendJson(res, 200, {
-    runtimeBaseUrl: binding.runtimeBaseUrl,
-    placementDefaults: {
-      placementId: binding.placementId || DEFAULT_PLACEMENT_ID,
-    },
-    tenantId: binding.tenantId,
-    keyScope: 'tenant',
+    ...projectBindingForResponse(binding),
+    lastProbeCode: cleanText(binding.lastProbeCode),
+    bindStatus: cleanText(binding.bindStatus || DEFAULT_BIND_STATUS),
   })
 }
 
@@ -985,6 +1497,10 @@ export default async function dashboardApiProxyHandler(req, res) {
 
   if (pathname === '/api/v1/public/runtime-domain/verify-and-bind' && method === 'POST') {
     await handleRuntimeDomainVerifyAndBind(req, res)
+    return
+  }
+  if (pathname === '/api/v1/public/runtime-domain/probe' && method === 'POST') {
+    await handleRuntimeDomainProbe(req, res)
     return
   }
   if (pathname === '/api/v1/public/sdk/bootstrap' && method === 'GET') {
