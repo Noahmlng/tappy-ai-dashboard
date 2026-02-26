@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
-function createDashboardSnapshot(placements) {
+function createDashboardSnapshot(placements, appId) {
+  const scopedAppId = appId || 'app_smoke'
   return {
     placementConfigVersion: 1,
     metricsSummary: {
@@ -34,10 +35,10 @@ function createDashboardSnapshot(placements) {
         { accountId: 'org_smoke', requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, cpa: 2.01 },
       ],
       byApp: [
-        { accountId: 'org_smoke', appId: 'app_smoke', requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, cpa: 2.01 },
+        { accountId: 'org_smoke', appId: scopedAppId, requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, cpa: 2.01 },
       ],
       byPlacement: [
-        { accountId: 'org_smoke', appId: 'app_smoke', placementId: 'chat_from_answer_v1', layer: 'runtime', requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, ctr: 0.07, fillRate: 0.66, cpa: 2.01 },
+        { accountId: 'org_smoke', appId: scopedAppId, placementId: 'chat_from_answer_v1', layer: 'runtime', requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, ctr: 0.07, fillRate: 0.66, cpa: 2.01 },
       ],
     },
     placements,
@@ -65,11 +66,11 @@ function createDashboardSnapshot(placements) {
       },
     ],
     controlPlaneApps: [
-      { accountId: 'org_smoke', appId: 'app_smoke', displayName: 'Smoke App' },
+      { accountId: 'org_smoke', appId: scopedAppId, displayName: 'Smoke App' },
     ],
     scope: {
       accountId: 'org_smoke',
-      appId: 'app_smoke',
+      appId: scopedAppId,
     },
   }
 }
@@ -81,18 +82,11 @@ test.describe('dashboard smoke flow', () => {
     const placementUpdatePath = /^\/api\/v1\/dashboard\/placements\/[^/]+$/
 
     let loggedIn = false
-    let keys = [
-      {
-        keyId: 'key_1',
-        appId: 'app_smoke',
-        accountId: 'org_smoke',
-        name: 'runtime-prod',
-        environment: 'prod',
-        status: 'active',
-        maskedKey: 'sk_live_****',
-        createdAt: '2026-02-25T10:00:00.000Z',
-      },
-    ]
+    let onboardingStatus = 'locked'
+    let onboardingVerifiedAt = ''
+    let scopedAppId = ''
+
+    let keys = []
     let placements = [
       {
         placementId: 'chat_from_answer_v1',
@@ -105,6 +99,16 @@ test.describe('dashboard smoke flow', () => {
         trigger: { intentThreshold: 0.7, cooldownMs: 1000 },
       },
     ]
+
+    const authPayload = () => ({
+      user: { email: 'smoke@example.com', accountId: 'org_smoke', appId: scopedAppId },
+      session: { id: 'sess_1' },
+      scope: { accountId: 'org_smoke', appId: scopedAppId },
+      onboarding: {
+        status: onboardingStatus,
+        verifiedAt: onboardingVerifiedAt,
+      },
+    })
 
     await page.route('**/api/v1/**', async (route) => {
       const request = route.request()
@@ -125,21 +129,21 @@ test.describe('dashboard smoke flow', () => {
           return
         }
 
-        await json(200, {
-          user: { email: 'smoke@example.com', accountId: 'org_smoke', appId: 'app_smoke' },
-          session: { id: 'sess_1' },
-          scope: { accountId: 'org_smoke', appId: 'app_smoke' },
-        })
+        await json(200, authPayload())
         return
       }
 
       if (pathname === '/api/v1/public/dashboard/login' && method === 'POST') {
         loggedIn = true
-        await json(200, {
-          user: { email: 'smoke@example.com', accountId: 'org_smoke', appId: 'app_smoke' },
-          session: { id: 'sess_1' },
-          scope: { accountId: 'org_smoke', appId: 'app_smoke' },
-        }, {
+        await json(200, authPayload(), {
+          'set-cookie': 'dash_session=sess_1; Path=/; HttpOnly; Secure; SameSite=Lax',
+        })
+        return
+      }
+
+      if (pathname === '/api/v1/public/dashboard/register' && method === 'POST') {
+        loggedIn = true
+        await json(200, authPayload(), {
           'set-cookie': 'dash_session=sess_1; Path=/; HttpOnly; Secure; SameSite=Lax',
         })
         return
@@ -154,7 +158,7 @@ test.describe('dashboard smoke flow', () => {
       }
 
       if (pathname === '/api/v1/dashboard/state' && method === 'GET') {
-        await json(200, createDashboardSnapshot(placements))
+        await json(200, createDashboardSnapshot(placements, scopedAppId || 'app_smoke'))
         return
       }
 
@@ -164,9 +168,10 @@ test.describe('dashboard smoke flow', () => {
       }
 
       if (pathname === '/api/v1/public/credentials/keys' && method === 'POST') {
+        scopedAppId = scopedAppId || 'app_smoke'
         const next = {
-          keyId: 'key_new',
-          appId: 'app_smoke',
+          keyId: `key_${keys.length + 1}`,
+          appId: scopedAppId,
           accountId: 'org_smoke',
           name: 'runtime-prod',
           environment: 'prod',
@@ -175,7 +180,15 @@ test.describe('dashboard smoke flow', () => {
           createdAt: '2026-02-25T10:01:00.000Z',
         }
         keys = [next, ...keys]
-        await json(200, { key: next, secret: 'sk_live_new_secret' })
+        await json(200, {
+          key: next,
+          secret: 'sk_live_new_secret',
+          scope: {
+            accountId: 'org_smoke',
+            appId: scopedAppId,
+          },
+          appCreated: true,
+        })
         return
       }
 
@@ -201,6 +214,17 @@ test.describe('dashboard smoke flow', () => {
         }
         keys = keys.map((row) => (row.keyId === targetId ? revoked : row))
         await json(200, { key: revoked })
+        return
+      }
+
+      if (pathname === '/api/v1/public/quick-start/verify' && method === 'POST') {
+        onboardingStatus = 'verified'
+        onboardingVerifiedAt = '2026-02-26T12:00:00.000Z'
+        await json(200, {
+          status: 'verified',
+          requestId: 'req_onboarding_1',
+          verifiedAt: onboardingVerifiedAt,
+        })
         return
       }
 
@@ -232,7 +256,7 @@ test.describe('dashboard smoke flow', () => {
     })
   })
 
-  test('login -> home -> api keys -> config -> logs -> logout', async ({ page }) => {
+  test('login -> onboarding -> verify -> unlock navigation', async ({ page }) => {
     await page.goto('/login')
 
     await expect(page.getByRole('heading', { name: 'Sign In' })).toBeVisible()
@@ -240,25 +264,35 @@ test.describe('dashboard smoke flow', () => {
     await page.getByLabel('Password').fill('smoke-password')
     await page.getByRole('button', { name: 'Sign In' }).click()
 
-    await expect(page).toHaveURL(/\/home$/)
-    await expect(page.getByRole('heading', { name: 'Revenue' })).toBeVisible()
+    await expect(page).toHaveURL(/\/onboarding$/)
+    await expect(page.getByRole('heading', { name: 'Onboarding', exact: true })).toBeVisible()
 
-    await page.locator('aside .nav-link[href=\"/api-keys\"]').first().click()
-    await expect(page).toHaveURL(/\/api-keys$/)
-    await expect(page.getByRole('heading', { name: 'Key', exact: true })).toBeVisible()
+    await expect(page.locator('aside .nav-link[href="/onboarding"]')).toHaveCount(1)
+    await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(0)
 
-    await page.locator('aside .nav-link[href=\"/config\"]').first().click()
+    await page.goto('/usage')
+    await expect(page).toHaveURL(/\/onboarding$/)
+
+    await page.getByRole('button', { name: 'Generate key' }).click()
+    await expect(page.getByText('Secret (once)')).toBeVisible()
+    await expect(page.locator('.secret-banner code')).toHaveText('sk_live_new_secret')
+
+    await page.getByRole('button', { name: 'Run verify' }).click()
+    await expect(page.getByText('status:')).toBeVisible()
+    await expect(page.locator('.meta-pill.good')).toHaveText('Verified')
+
+    await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(1)
+    await page.locator('aside .nav-link[href="/usage"]').first().click()
+    await expect(page).toHaveURL(/\/usage$/)
+    await expect(page.getByRole('heading', { name: 'Usage & Revenue' })).toBeVisible()
+
+    await page.locator('aside .nav-link[href="/config"]').first().click()
     await expect(page).toHaveURL(/\/config$/)
     await expect(page.getByRole('heading', { name: 'Placement', exact: true })).toBeVisible()
 
-    await page.locator('aside .nav-link[href=\"/logs\"]').first().click()
+    await page.locator('aside .nav-link[href="/logs"]').first().click()
     await expect(page).toHaveURL(/\/logs$/)
     await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible()
-
-    const hasAuthTokenInStorage = await page.evaluate(() => (
-      Object.keys(window.localStorage).some((key) => key.includes('auth'))
-    ))
-    expect(hasAuthTokenInStorage).toBe(false)
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)

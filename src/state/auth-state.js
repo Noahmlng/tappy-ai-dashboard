@@ -3,6 +3,30 @@ import { reactive } from 'vue'
 import { controlPlaneClient, setDashboardAccessToken } from '../api/control-plane-client'
 import { setScope } from './scope-state'
 
+function normalizeOnboarding(source = {}) {
+  const status = String(source?.status || '').trim().toLowerCase()
+  return {
+    status: status === 'verified' ? 'verified' : 'locked',
+    verifiedAt: String(source?.verifiedAt || source?.verified_at || '').trim(),
+  }
+}
+
+function resolveOnboarding(payload = {}, user = {}, scope = {}) {
+  const explicit = normalizeOnboarding(payload?.onboarding || {})
+  if (explicit.status === 'verified') return explicit
+
+  const accountId = String(scope?.accountId || user?.accountId || '').trim()
+  const appId = String(scope?.appId || user?.appId || '').trim()
+  if (accountId && appId) {
+    return {
+      status: 'verified',
+      verifiedAt: explicit.verifiedAt,
+    }
+  }
+
+  return explicit
+}
+
 function applyScopeFromUser(user = {}, scope = {}) {
   const accountId = String(scope.accountId || user.accountId || '').trim()
   const appId = String(scope.appId || user.appId || '').trim()
@@ -17,6 +41,10 @@ function applyScopeFromUser(user = {}, scope = {}) {
 export const authState = reactive({
   user: null,
   session: null,
+  onboarding: {
+    status: 'locked',
+    verifiedAt: '',
+  },
   authenticated: false,
   ready: false,
   loading: false,
@@ -27,26 +55,41 @@ function applyAuthPayload(payload = {}) {
   const user = payload?.user && typeof payload.user === 'object' ? payload.user : null
   const session = payload?.session && typeof payload.session === 'object' ? payload.session : null
   const accessToken = String(session?.accessToken || session?.access_token || '').trim()
+  const scope = payload?.scope && typeof payload.scope === 'object' ? payload.scope : {}
+  const onboarding = resolveOnboarding(payload, user || {}, scope)
 
   authState.user = user
   authState.session = session
+  authState.onboarding.status = onboarding.status
+  authState.onboarding.verifiedAt = onboarding.verifiedAt
   authState.authenticated = Boolean(user)
   authState.error = ''
   authState.ready = true
   setDashboardAccessToken(accessToken)
 
   if (user) {
-    applyScopeFromUser(user, payload?.scope || {})
+    applyScopeFromUser(user, scope)
   }
 }
 
 function clearAuthState() {
   authState.user = null
   authState.session = null
+  authState.onboarding.status = 'locked'
+  authState.onboarding.verifiedAt = ''
   authState.authenticated = false
   authState.error = ''
   authState.ready = true
   setDashboardAccessToken('')
+}
+
+export function isOnboardingVerified() {
+  return authState.onboarding.status === 'verified'
+}
+
+export function markOnboardingVerified(verifiedAt = '') {
+  authState.onboarding.status = 'verified'
+  authState.onboarding.verifiedAt = String(verifiedAt || '').trim() || new Date().toISOString()
 }
 
 export async function hydrateAuthSession() {

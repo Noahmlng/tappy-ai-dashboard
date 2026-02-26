@@ -78,6 +78,19 @@ describe('control-plane-client runtime behavior', () => {
     expect(options.headers.Authorization).toBe('Bearer dsh_test_token')
   })
 
+  it('supports quick-start verify with empty payload', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ status: 'verified', requestId: 'req_1' }))
+
+    await controlPlaneClient.quickStart.verify()
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/public/quick-start/verify')
+    expect(options.method).toBe('POST')
+    expect(options.body).toBe('{}')
+  })
+
   it('normalizes error payloads', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
       error: {

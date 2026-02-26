@@ -1,7 +1,7 @@
 import { reactive } from 'vue'
 
 import { controlPlaneClient } from '../api/control-plane-client'
-import { getScopeQuery } from './scope-state'
+import { getScopeQuery, setScope, scopeState } from './scope-state'
 
 function nowIso() {
   return new Date().toISOString()
@@ -96,6 +96,14 @@ export async function createApiKey(input) {
     ...(input || {}),
     appId: String(input?.appId ?? scope.appId ?? '').trim(),
     accountId: String(input?.accountId ?? scope.accountId ?? '').trim(),
+    environment: String(input?.environment || 'prod').trim() || 'prod',
+    name: String(input?.name || 'runtime-prod').trim() || 'runtime-prod',
+  }
+  if (!scopedInput.appId) {
+    Reflect.deleteProperty(scopedInput, 'appId')
+  }
+  if (!scopedInput.accountId) {
+    Reflect.deleteProperty(scopedInput, 'accountId')
   }
 
   try {
@@ -103,6 +111,17 @@ export async function createApiKey(input) {
     const normalized = normalizeItem(payload?.key || payload)
     if (!normalized) {
       throw new Error('Unexpected create key response')
+    }
+    const responseScope = payload?.scope && typeof payload.scope === 'object'
+      ? payload.scope
+      : {}
+    const nextAccountId = String(responseScope.accountId || scopeState.accountId || '').trim()
+    const nextAppId = String(responseScope.appId || normalized.appId || scopeState.appId || '').trim()
+    if (nextAccountId || nextAppId) {
+      setScope({
+        accountId: nextAccountId,
+        appId: nextAppId,
+      })
     }
     upsertItem(apiKeysState.items, normalized)
     apiKeysState.meta.syncMode = 'remote'

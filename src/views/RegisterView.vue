@@ -2,7 +2,6 @@
 import { computed, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
-import { hydrateDashboardState } from '../state/dashboard-state'
 import { authState, registerDashboardUser } from '../state/auth-state'
 
 const router = useRouter()
@@ -11,9 +10,6 @@ const submitError = ref('')
 const draft = reactive({
   email: '',
   password: '',
-  displayName: '',
-  accountId: '',
-  appId: '',
 })
 
 const isBusy = computed(() => Boolean(authState.loading))
@@ -24,12 +20,8 @@ async function handleRegister() {
     await registerDashboardUser({
       email: draft.email,
       password: draft.password,
-      displayName: draft.displayName,
-      accountId: draft.accountId,
-      appId: draft.appId,
     })
-    await hydrateDashboardState()
-    await router.replace('/home')
+    await router.replace('/onboarding')
   } catch (error) {
     submitError.value = error instanceof Error ? error.message : 'Register failed'
   }
@@ -42,7 +34,7 @@ async function handleRegister() {
       <p class="eyebrow">Customer Access</p>
       <h2>Create Account</h2>
       <p class="subtitle">
-        Register a dashboard identity for one advertiser account.
+        Create your account. Scope is assigned automatically.
       </p>
     </header>
 
@@ -62,25 +54,13 @@ async function handleRegister() {
             autocomplete="new-password"
           >
         </label>
-        <label>
-          Display Name (optional)
-          <input v-model="draft.displayName" class="input" type="text" maxlength="64">
-        </label>
-        <label>
-          Account ID
-          <input v-model="draft.accountId" class="input" type="text" maxlength="64" placeholder="org_your_company">
-        </label>
-        <label>
-          App ID (optional)
-          <input v-model="draft.appId" class="input" type="text" maxlength="64" placeholder="your_chat_app">
-        </label>
       </div>
 
       <div class="toolbar-actions">
         <button
           class="button"
           type="button"
-          :disabled="isBusy || !draft.email.trim() || !draft.password || !draft.accountId.trim()"
+          :disabled="isBusy || !draft.email.trim() || !draft.password"
           @click="handleRegister"
         >
           {{ isBusy ? 'Creating...' : 'Create Account' }}

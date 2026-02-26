@@ -2,7 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
-import { authState, logoutDashboardUser } from './state/auth-state'
+import { authState, isOnboardingVerified, logoutDashboardUser } from './state/auth-state'
 
 const route = useRoute()
 const router = useRouter()
@@ -12,10 +12,15 @@ const sidebarCollapsed = ref(false)
 
 const navItems = computed(() => {
   if (!authState.authenticated) return []
+  if (!isOnboardingVerified()) {
+    return [
+      { to: '/onboarding', label: 'Onboarding', icon: 'flash' },
+    ]
+  }
   return [
+    { to: '/onboarding', label: 'Onboarding', icon: 'flash' },
     { to: '/home', label: 'Revenue', icon: 'home' },
     { to: '/usage', label: 'Usage', icon: 'chart' },
-    { to: '/quick-start', label: 'Quick Start', icon: 'flash' },
     { to: '/api-keys', label: 'Key', icon: 'key' },
     { to: '/config', label: 'Placement', icon: 'sliders' },
     { to: '/logs', label: 'Logs', icon: 'list' },

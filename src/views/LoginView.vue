@@ -2,7 +2,6 @@
 import { computed, reactive, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
-import { hydrateDashboardState } from '../state/dashboard-state'
 import { authState, loginDashboardUser } from '../state/auth-state'
 
 const router = useRouter()
@@ -23,8 +22,7 @@ async function handleLogin() {
       email: draft.email,
       password: draft.password,
     })
-    await hydrateDashboardState()
-    const redirect = String(route.query.redirect || '/home')
+    const redirect = String(route.query.redirect || '/onboarding')
     await router.replace(redirect)
   } catch (error) {
     submitError.value = error instanceof Error ? error.message : 'Login failed'
@@ -69,7 +67,7 @@ async function handleLogin() {
           {{ isBusy ? 'Signing in...' : 'Sign In' }}
         </button>
         <RouterLink class="button button-secondary" to="/register">
-          Create account
+          Need an account?
         </RouterLink>
       </div>
       <p v-if="submitError || authState.error" class="muted">

@@ -4,9 +4,9 @@ A control-plane dashboard for revenue, usage, API keys, placement config, and de
 
 ## Core Pages
 
+- Onboarding
 - Revenue
 - Usage
-- Quick Start
 - API Keys
 - Placement
 - Logs

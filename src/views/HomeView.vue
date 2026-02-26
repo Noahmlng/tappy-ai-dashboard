@@ -30,7 +30,7 @@ const revenueCards = computed(() => {
 
 const coreActions = [
   { to: '/usage', title: 'Usage & Revenue' },
-  { to: '/quick-start', title: 'Quick Start' },
+  { to: '/onboarding', title: 'Onboarding' },
   { to: '/api-keys', title: 'Get Key' },
 ]
 

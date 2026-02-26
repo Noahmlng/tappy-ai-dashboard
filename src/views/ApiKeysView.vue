@@ -1,8 +1,6 @@
 <script setup>
-import { computed, onMounted, reactive } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
-import { controlPlaneClient } from '../api/control-plane-client'
-import { authState } from '../state/auth-state'
 import {
   apiKeysState,
   clearRevealedSecret,
@@ -11,22 +9,11 @@ import {
   revokeApiKey,
   rotateApiKey,
 } from '../state/api-keys-state'
-import { scopeState, setScope } from '../state/scope-state'
-
-const draft = reactive({
-  name: 'runtime-prod',
-})
-
-const appSelection = reactive({
-  loading: false,
-  error: '',
-  options: [],
-})
+import { scopeState } from '../state/scope-state'
 
 const isBusy = computed(() => Boolean(apiKeysState.meta.loading || apiKeysState.meta.syncing))
-const refreshBusy = computed(() => Boolean(isBusy.value || appSelection.loading))
-const rows = computed(() => Array.isArray(apiKeysState.items) ? apiKeysState.items : [])
-const hasMultipleApps = computed(() => appSelection.options.length > 1)
+const rows = computed(() => (Array.isArray(apiKeysState.items) ? apiKeysState.items : []))
+const createError = ref('')
 
 function formatDate(value) {
   if (!value) return '-'
@@ -39,87 +26,14 @@ function statusClass(status) {
   return status === 'revoked' ? 'status-pill bad' : 'status-pill good'
 }
 
-function normalizeAppOptions(controlPlaneApps = []) {
-  const rows = Array.isArray(controlPlaneApps) ? controlPlaneApps : []
-  const filtered = rows.filter((row) => {
-    const accountId = String(row?.accountId || row?.organizationId || '').trim()
-    return accountId && accountId === String(scopeState.accountId || '').trim()
-  })
-  const mapped = filtered
-    .map((row) => {
-      const appId = String(row?.appId || '').trim()
-      if (!appId) return null
-      return {
-        appId,
-        label: String(row?.displayName || '').trim() || appId,
-      }
-    })
-    .filter(Boolean)
-
-  const deduped = []
-  const seen = new Set()
-  for (const item of mapped) {
-    if (seen.has(item.appId)) continue
-    seen.add(item.appId)
-    deduped.push(item)
-  }
-  deduped.sort((a, b) => a.label.localeCompare(b.label))
-  return deduped
-}
-
-async function hydrateAppOptions() {
-  appSelection.loading = true
-  appSelection.error = ''
-  try {
-    if (!scopeState.accountId) {
-      appSelection.options = []
-      return
-    }
-    const snapshot = await controlPlaneClient.dashboard.getState({
-      accountId: scopeState.accountId,
-    })
-    appSelection.options = normalizeAppOptions(snapshot?.controlPlaneApps)
-
-    const hasCurrent = appSelection.options.some((item) => item.appId === scopeState.appId)
-    if (!hasCurrent) {
-      const fallbackAppId = String(authState.user?.appId || '').trim() || String(appSelection.options[0]?.appId || '').trim()
-      if (fallbackAppId) {
-        setScope({ accountId: scopeState.accountId, appId: fallbackAppId })
-      }
-    }
-  } catch (error) {
-    appSelection.options = []
-    appSelection.error = error instanceof Error ? error.message : 'App list unavailable.'
-  } finally {
-    appSelection.loading = false
-  }
-}
-
-async function onChangeApp(appId) {
-  const nextAppId = String(appId || '').trim()
-  if (!nextAppId || nextAppId === scopeState.appId) return
-  setScope({
-    accountId: scopeState.accountId,
-    appId: nextAppId,
-  })
-  clearRevealedSecret()
-  await hydrateApiKeys()
-}
-
 async function handleCreate() {
+  createError.value = ''
   clearRevealedSecret()
-  const scopedInput = {
-    accountId: String(scopeState.accountId || '').trim(),
-    appId: String(scopeState.appId || '').trim(),
+  const result = await createApiKey({})
+  if (!result?.ok) {
+    createError.value = String(result?.error || 'Create key failed')
+    return
   }
-
-  await createApiKey({
-    name: String(draft.name || '').trim() || 'runtime',
-    environment: 'prod',
-    appId: scopedInput.appId,
-    accountId: scopedInput.accountId,
-  })
-
   await hydrateApiKeys()
 }
 
@@ -132,7 +46,6 @@ async function handleRevoke(keyId) {
 }
 
 async function refreshKeys() {
-  await hydrateAppOptions()
   await hydrateApiKeys()
 }
 
@@ -147,11 +60,11 @@ onMounted(() => {
       <div class="header-stack">
         <p class="eyebrow">Keys</p>
         <h2>Key</h2>
-        <p class="subtitle">Create, rotate, revoke</p>
+        <p class="subtitle">One-click generation with auto scope assignment.</p>
       </div>
       <div class="header-actions">
-        <button class="button" type="button" :disabled="refreshBusy" @click="refreshKeys()">
-          {{ refreshBusy ? 'Sync...' : 'Sync' }}
+        <button class="button" type="button" :disabled="isBusy" @click="refreshKeys()">
+          {{ isBusy ? 'Sync...' : 'Sync' }}
         </button>
       </div>
     </header>
@@ -159,35 +72,18 @@ onMounted(() => {
     <article class="panel create-key-form">
       <h3>Scope</h3>
       <p class="muted">Account <strong>{{ scopeState.accountId || '-' }}</strong></p>
-      <label v-if="hasMultipleApps">
-        App
-        <select class="input" :value="scopeState.appId" @change="onChangeApp($event.target.value)">
-          <option v-for="item in appSelection.options" :key="item.appId" :value="item.appId">{{ item.label }}</option>
-        </select>
-      </label>
-      <p v-else class="muted">App <strong>{{ scopeState.appId || '-' }}</strong></p>
-      <p class="muted" v-if="appSelection.error">{{ appSelection.error }}</p>
+      <p class="muted">App <strong>{{ scopeState.appId || 'Auto-assigned on first key' }}</strong></p>
     </article>
 
     <article class="panel">
       <div class="panel-toolbar">
         <h3>Create</h3>
-        <button class="button" type="button" :disabled="isBusy || !scopeState.appId" @click="handleCreate">
-          {{ isBusy ? 'Creating...' : 'Create' }}
+        <button class="button" type="button" :disabled="isBusy || !scopeState.accountId" @click="handleCreate">
+          {{ isBusy ? 'Creating...' : 'Generate key' }}
         </button>
       </div>
-      <div class="form-grid">
-        <label>
-          Name
-          <input
-            v-model="draft.name"
-            class="input"
-            type="text"
-            maxlength="40"
-            placeholder="runtime-prod"
-          >
-        </label>
-      </div>
+      <p class="muted">No optional parameters required.</p>
+      <p v-if="createError" class="muted">{{ createError }}</p>
       <div v-if="apiKeysState.meta.lastRevealedSecret" class="secret-banner">
         <strong>Secret (once)</strong>
         <code>{{ apiKeysState.meta.lastRevealedSecret }}</code>
@@ -206,7 +102,6 @@ onMounted(() => {
           <thead>
             <tr>
               <th>Name</th>
-              <th>Env</th>
               <th>Status</th>
               <th>Masked</th>
               <th>Created</th>
@@ -216,7 +111,6 @@ onMounted(() => {
           <tbody>
             <tr v-for="row in rows" :key="row.keyId">
               <td>{{ row.name }}</td>
-              <td>{{ row.environment }}</td>
               <td>
                 <span :class="statusClass(row.status)">
                   {{ row.status }}
@@ -246,7 +140,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="rows.length === 0">
-              <td colspan="6" class="muted">No keys.</td>
+              <td colspan="5" class="muted">No keys.</td>
             </tr>
           </tbody>
         </table>

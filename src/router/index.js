@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import { authState, hydrateAuthSession } from '../state/auth-state'
+import { authState, hydrateAuthSession, isOnboardingVerified } from '../state/auth-state'
 import ApiKeysView from '../views/ApiKeysView.vue'
 import DecisionLogsView from '../views/DecisionLogsView.vue'
 import HomeView from '../views/HomeView.vue'
@@ -13,7 +13,7 @@ import UsageView from '../views/UsageView.vue'
 const routes = [
   {
     path: '/',
-    redirect: '/home',
+    redirect: '/onboarding',
   },
   {
     path: '/login',
@@ -28,6 +28,16 @@ const routes = [
     meta: { publicRoute: true },
   },
   {
+    path: '/onboarding',
+    name: 'onboarding',
+    component: QuickStartView,
+    meta: { navLabel: 'Onboarding', requiresAuth: true },
+  },
+  {
+    path: '/quick-start',
+    redirect: '/onboarding',
+  },
+  {
     path: '/home',
     name: 'home',
     component: HomeView,
@@ -38,12 +48,6 @@ const routes = [
     name: 'usage',
     component: UsageView,
     meta: { navLabel: 'Usage', requiresAuth: true },
-  },
-  {
-    path: '/quick-start',
-    name: 'quickStart',
-    component: QuickStartView,
-    meta: { navLabel: 'Quick Start', requiresAuth: true },
   },
   {
     path: '/api-keys',
@@ -81,9 +85,10 @@ router.beforeEach(async (to) => {
 
   const isPublic = Boolean(to.meta?.publicRoute)
   const requiresAuth = Boolean(to.meta?.requiresAuth)
+  const onboardingVerified = isOnboardingVerified()
 
   if (isPublic && authState.authenticated) {
-    return '/home'
+    return onboardingVerified ? '/home' : '/onboarding'
   }
   if (requiresAuth && !authState.authenticated) {
     const redirectTarget = String(to.fullPath || '/home')
@@ -91,6 +96,9 @@ router.beforeEach(async (to) => {
       path: '/login',
       query: { redirect: redirectTarget },
     }
+  }
+  if (requiresAuth && authState.authenticated && !onboardingVerified && to.name !== 'onboarding') {
+    return '/onboarding'
   }
   return true
 })
