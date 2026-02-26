@@ -456,6 +456,12 @@ test.describe('dashboard smoke flow', () => {
     await expect(page.getByRole('heading', { name: 'Revenue', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Sync' }).first().click()
     await expect(page.getByText('Core')).toBeVisible()
+    await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(0)
+    await expect(page.locator('aside .nav-link[href="/api-keys"]')).toHaveCount(0)
+    await expect(page.locator('aside .nav-link[href="/config"]')).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Advanced Tools' }).click()
+    await expect(page.getByRole('button', { name: 'Hide Tools' })).toBeVisible()
 
     await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(1)
     await page.locator('aside .nav-link[href="/usage"]').first().click()
@@ -520,7 +526,7 @@ test.describe('dashboard smoke flow', () => {
     await expect(page.locator('.meta-pill.warn')).toHaveText('Pending')
     await expect(page.getByText('Runtime Not Ready')).toBeVisible()
     await expect(page.locator('p:has-text("probeCode:") code')).toHaveText('EGRESS_BLOCKED')
-    await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(1)
+    await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(0)
 
     await page.locator('aside .nav-link[href="/home"]').first().click()
     await expect(page).toHaveURL(/\/home$/)

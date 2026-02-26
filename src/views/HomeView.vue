@@ -31,7 +31,6 @@ const revenueCards = computed(() => {
 const coreActions = [
   { to: '/onboarding', title: 'Integrate (3 min)' },
   { to: '/logs', title: 'Logs' },
-  { to: '/usage', title: 'Usage & Revenue' },
 ]
 
 function refreshRevenue() {

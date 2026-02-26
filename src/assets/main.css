@@ -380,6 +380,14 @@ samp,
   gap: var(--space-12);
 }
 
+.nav-advanced-toggle {
+  width: 100%;
+  font-size: 11px;
+  justify-content: center;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .nav-meta {
   display: grid;
   gap: var(--space-4);
@@ -465,7 +473,8 @@ samp,
   .app-shell.sidebar-collapsed .eyebrow,
   .app-shell.sidebar-collapsed .nav-label,
   .app-shell.sidebar-collapsed .nav-meta,
-  .app-shell.sidebar-collapsed .nav-signout {
+  .app-shell.sidebar-collapsed .nav-signout,
+  .app-shell.sidebar-collapsed .nav-advanced-toggle {
     opacity: 0;
     width: 0;
     height: 0;
