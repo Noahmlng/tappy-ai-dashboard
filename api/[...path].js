@@ -1,3 +1,8 @@
+import { createHash } from 'node:crypto'
+import { resolve4 as dnsResolve4, resolve6 as dnsResolve6, resolveCname as dnsResolveCname } from 'node:dns/promises'
+import net from 'node:net'
+import tls from 'node:tls'
+
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -26,6 +31,359 @@ const UPSTREAM_TIMEOUT_MS = 10_000
 const DEFAULT_ENVIRONMENT = 'prod'
 const DEFAULT_PLACEMENT_ID = 'chat_from_answer_v1'
 const DEFAULT_KEY_NAME = 'runtime-prod'
+const DEFAULT_RUNTIME_GATEWAY_HOST = 'runtime-gateway.tappy.ai'
+const RUNTIME_VERIFY_TIMEOUT_MS = 8_000
+const URL_IN_TEXT_RE = /(https?:\/\/[^\s"'<>]+)/i
+
+const runtimeDomainBindings = new Map()
+let runtimeDepsOverride = null
+
+function defaultRuntimeDeps() {
+  return {
+    resolve4: dnsResolve4,
+    resolve6: dnsResolve6,
+    resolveCname: dnsResolveCname,
+    tlsConnect: tls.connect.bind(tls),
+    fetch: globalThis.fetch.bind(globalThis),
+    now: () => Date.now(),
+    random: () => Math.random(),
+  }
+}
+
+function getRuntimeDeps() {
+  return runtimeDepsOverride
+    ? {
+      ...defaultRuntimeDeps(),
+      ...runtimeDepsOverride,
+    }
+    : defaultRuntimeDeps()
+}
+
+export function setRuntimeDepsForTests(overrides = null) {
+  runtimeDepsOverride = overrides
+}
+
+export function clearRuntimeDomainBindingsForTests() {
+  runtimeDomainBindings.clear()
+}
+
+function normalizeHost(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, '')
+}
+
+function isPrivateIpv4(value) {
+  const parts = String(value || '')
+    .split('.')
+    .map((item) => Number.parseInt(item, 10))
+  if (parts.length !== 4 || parts.some((item) => Number.isNaN(item))) return false
+
+  if (parts[0] === 10) return true
+  if (parts[0] === 127) return true
+  if (parts[0] === 169 && parts[1] === 254) return true
+  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
+  if (parts[0] === 192 && parts[1] === 168) return true
+  return false
+}
+
+function isPrivateIpv6(value) {
+  const normalized = String(value || '').toLowerCase()
+  return normalized === '::1'
+    || normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe80:')
+}
+
+function isPrivateOrLoopbackHost(hostname) {
+  const normalized = normalizeHost(hostname)
+  const ipVersion = net.isIP(normalized)
+  if (ipVersion === 4) return isPrivateIpv4(normalized)
+  if (ipVersion === 6) return isPrivateIpv6(normalized)
+  return normalized === 'localhost'
+    || normalized.endsWith('.localhost')
+    || normalized.endsWith('.local')
+}
+
+function isReservedDomain(hostname) {
+  const normalized = normalizeHost(hostname)
+  if (!normalized) return true
+  if (normalized === 'example.com') return true
+  if (normalized.endsWith('.example.com')) return true
+  return false
+}
+
+export function normalizeRuntimeDomain(rawValue) {
+  const input = cleanText(rawValue)
+  if (!input) return { ok: false, failureCode: 'CNAME_MISMATCH' }
+
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input) ? input : `https://${input}`
+  let parsed
+  try {
+    parsed = new URL(candidate)
+  } catch {
+    return { ok: false, failureCode: 'CNAME_MISMATCH' }
+  }
+
+  const protocol = String(parsed.protocol || '').toLowerCase()
+  const hostname = normalizeHost(parsed.hostname)
+  if (!['http:', 'https:'].includes(protocol) || !hostname) {
+    return { ok: false, failureCode: 'CNAME_MISMATCH' }
+  }
+  if (isReservedDomain(hostname) || isPrivateOrLoopbackHost(hostname)) {
+    return { ok: false, failureCode: 'CNAME_MISMATCH' }
+  }
+
+  return {
+    ok: true,
+    hostname,
+    runtimeBaseUrl: `https://${hostname}`,
+  }
+}
+
+function createRequestId(prefix = 'req') {
+  const random = Math.floor((1 + Math.random()) * 1_000_000).toString(36)
+  return `${prefix}_${Date.now().toString(36)}_${random}`
+}
+
+function readHeaderValue(headers = {}, key) {
+  const target = String(key || '').toLowerCase()
+  for (const [headerKey, value] of Object.entries(headers || {})) {
+    if (String(headerKey || '').toLowerCase() === target) {
+      return Array.isArray(value) ? String(value[0] || '') : String(value || '')
+    }
+  }
+  return ''
+}
+
+function normalizeAuthorization(rawValue) {
+  return cleanText(rawValue)
+}
+
+function makeTenantId(authorization, deps) {
+  const digest = createHash('sha256')
+    .update(cleanText(authorization))
+    .digest('hex')
+    .slice(0, 12)
+  const now = Number(deps?.now?.() || Date.now()).toString(36).slice(-4)
+  return `tenant_${digest}_${now}`
+}
+
+function extractFirstUrl(value) {
+  const input = cleanText(value)
+  if (!input) return ''
+  const matched = input.match(URL_IN_TEXT_RE)
+  return matched ? cleanText(matched[1]) : ''
+}
+
+function pickLandingUrl(source = {}) {
+  const payload = source && typeof source === 'object' ? source : {}
+  const ad = payload.ad && typeof payload.ad === 'object' ? payload.ad : {}
+
+  return pickFirstText(
+    payload.landingUrl,
+    payload.url,
+    payload.link,
+    ad.landingUrl,
+    ad.url,
+    ad.link,
+    extractFirstUrl(payload.message),
+    extractFirstUrl(ad.message),
+  )
+}
+
+export function normalizeBidPayload(source = {}) {
+  const payload = source && typeof source === 'object' ? source : {}
+  const landingUrl = pickLandingUrl(payload)
+  const ad = payload.ad && typeof payload.ad === 'object'
+    ? {
+      ...payload.ad,
+      landingUrl: pickFirstText(
+        payload.ad.landingUrl,
+        payload.ad.url,
+        payload.ad.link,
+        landingUrl,
+      ),
+    }
+    : payload.ad
+
+  const next = {
+    ...payload,
+    ad,
+  }
+  if (landingUrl) {
+    next.landingUrl = landingUrl
+  }
+  return {
+    payload: next,
+    landingUrl,
+  }
+}
+
+function createChecks() {
+  return {
+    dnsOk: false,
+    cnameOk: false,
+    tlsOk: false,
+    connectOk: false,
+    authOk: false,
+    bidOk: false,
+    landingUrlOk: false,
+  }
+}
+
+function createRuntimeError(failureCode, message = '') {
+  const error = new Error(message || failureCode)
+  error.failureCode = failureCode
+  return error
+}
+
+async function resolveDnsWithCname(hostname, gatewayHost, deps) {
+  const normalizedHost = normalizeHost(hostname)
+  const normalizedGatewayHost = normalizeHost(gatewayHost)
+  const checks = {
+    dnsOk: false,
+    cnameOk: false,
+  }
+
+  const [ipv4, ipv6] = await Promise.all([
+    deps.resolve4(normalizedHost).catch(() => []),
+    deps.resolve6(normalizedHost).catch(() => []),
+  ])
+  const hasAddress = (Array.isArray(ipv4) && ipv4.length > 0) || (Array.isArray(ipv6) && ipv6.length > 0)
+
+  let cnameTargets = []
+  try {
+    cnameTargets = await deps.resolveCname(normalizedHost)
+  } catch {
+    cnameTargets = []
+  }
+
+  if (!hasAddress && cnameTargets.length === 0) {
+    throw createRuntimeError('DNS_ENOTFOUND', 'Domain is not resolvable.')
+  }
+  checks.dnsOk = true
+
+  const normalizedTargets = cnameTargets.map((item) => normalizeHost(item))
+  if (normalizedTargets.length === 0 || !normalizedTargets.includes(normalizedGatewayHost)) {
+    throw createRuntimeError('CNAME_MISMATCH', 'Domain is not pointing to runtime gateway.')
+  }
+  checks.cnameOk = true
+  return checks
+}
+
+async function verifyTls(hostname, deps) {
+  const checks = {
+    tlsOk: false,
+    connectOk: false,
+  }
+  await new Promise((resolve, reject) => {
+    const socket = deps.tlsConnect({
+      host: hostname,
+      port: 443,
+      servername: hostname,
+      rejectUnauthorized: true,
+    })
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(createRuntimeError('TLS_INVALID', 'TLS handshake timed out.'))
+    }, RUNTIME_VERIFY_TIMEOUT_MS)
+
+    socket.on('secureConnect', () => {
+      clearTimeout(timer)
+      socket.end()
+      resolve(true)
+    })
+    socket.on('error', () => {
+      clearTimeout(timer)
+      reject(createRuntimeError('TLS_INVALID', 'TLS handshake failed.'))
+    })
+  })
+  checks.tlsOk = true
+  checks.connectOk = true
+  return checks
+}
+
+function createBidProbePayload(placementId) {
+  return {
+    userId: 'probe_user',
+    chatId: 'probe_chat',
+    placementId: cleanText(placementId) || DEFAULT_PLACEMENT_ID,
+    messages: [
+      { role: 'user', content: 'probe message' },
+      { role: 'assistant', content: 'probe context' },
+    ],
+  }
+}
+
+async function readJsonResponse(response) {
+  const contentType = cleanText(response?.headers?.get('content-type')).toLowerCase()
+  if (contentType.includes('application/json')) {
+    return response.json().catch(() => null)
+  }
+  const rawText = await response.text().catch(() => '')
+  if (!rawText) return null
+  try {
+    return JSON.parse(rawText)
+  } catch {
+    return null
+  }
+}
+
+async function probeBid(runtimeBaseUrl, placementId, authorization, deps) {
+  const probeResponse = await deps.fetch(`${runtimeBaseUrl}/api/v2/bid`, {
+    method: 'POST',
+    headers: {
+      authorization,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(createBidProbePayload(placementId)),
+  }).catch((error) => {
+    if (error?.failureCode) throw error
+    throw createRuntimeError('NETWORK_BLOCKED', 'Runtime bid probe failed.')
+  })
+
+  if (!probeResponse) {
+    throw createRuntimeError('NETWORK_BLOCKED', 'Runtime bid probe failed.')
+  }
+
+  if (probeResponse.status === 401 || probeResponse.status === 403) {
+    throw createRuntimeError('AUTH_FORBIDDEN', 'Authorization rejected by runtime.')
+  }
+  if (!probeResponse.ok) {
+    throw createRuntimeError('NETWORK_BLOCKED', `Runtime bid probe failed with status ${probeResponse.status}.`)
+  }
+
+  const parsed = await readJsonResponse(probeResponse)
+  if (!parsed || typeof parsed !== 'object') {
+    throw createRuntimeError('BID_INVALID_RESPONSE', 'Runtime bid response is not JSON.')
+  }
+
+  const { landingUrl, payload } = normalizeBidPayload(parsed)
+  if (!landingUrl) {
+    throw createRuntimeError('BID_INVALID_RESPONSE', 'Runtime bid response does not contain landingUrl.')
+  }
+
+  return {
+    landingUrl,
+    payload,
+  }
+}
+
+function getBoundRuntimeByAuthorization(authorization) {
+  const normalized = normalizeAuthorization(authorization)
+  if (!normalized) return null
+  return runtimeDomainBindings.get(normalized) || null
+}
+
+function setBoundRuntimeByAuthorization(authorization, binding) {
+  const normalized = normalizeAuthorization(authorization)
+  if (!normalized) return
+  runtimeDomainBindings.set(normalized, {
+    ...binding,
+  })
+}
 
 export function normalizeUpstreamBaseUrl(rawValue) {
   const value = String(rawValue || '')
@@ -386,7 +744,245 @@ export function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload))
 }
 
+function getRuntimeGatewayHost(env = process.env) {
+  const configured = cleanText(env?.MEDIATION_RUNTIME_GATEWAY_HOST)
+  return normalizeHost(configured || DEFAULT_RUNTIME_GATEWAY_HOST)
+}
+
+async function handleRuntimeDomainVerifyAndBind(req, res) {
+  const requestId = createRequestId('req_runtime_bind')
+  const checks = createChecks()
+  const deps = getRuntimeDeps()
+  const requestBody = await readRequestBody(req)
+  const payload = parseJsonBody(requestBody)
+  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
+
+  const placementId = cleanText(payload?.placementId) || DEFAULT_PLACEMENT_ID
+  const normalizedDomain = normalizeRuntimeDomain(payload?.domain)
+  const runtimeBaseUrl = normalizedDomain.runtimeBaseUrl || ''
+
+  if (!authorization) {
+    sendJson(res, 200, {
+      status: 'failed',
+      runtimeBaseUrl,
+      checks,
+      requestId,
+      failureCode: 'AUTH_FORBIDDEN',
+    })
+    return
+  }
+
+  if (!normalizedDomain.ok) {
+    sendJson(res, 200, {
+      status: 'failed',
+      runtimeBaseUrl,
+      checks,
+      requestId,
+      failureCode: normalizedDomain.failureCode || 'CNAME_MISMATCH',
+    })
+    return
+  }
+
+  try {
+    const dnsChecks = await resolveDnsWithCname(
+      normalizedDomain.hostname,
+      getRuntimeGatewayHost(),
+      deps,
+    )
+    checks.dnsOk = dnsChecks.dnsOk
+    checks.cnameOk = dnsChecks.cnameOk
+
+    const tlsChecks = await verifyTls(normalizedDomain.hostname, deps)
+    checks.tlsOk = tlsChecks.tlsOk
+    checks.connectOk = tlsChecks.connectOk
+
+    const probe = await probeBid(runtimeBaseUrl, placementId, authorization, deps)
+    checks.authOk = true
+    checks.bidOk = true
+    checks.landingUrlOk = Boolean(probe.landingUrl)
+
+    const tenantId = makeTenantId(authorization, deps)
+    setBoundRuntimeByAuthorization(authorization, {
+      tenantId,
+      runtimeBaseUrl,
+      placementId,
+      keyScope: 'tenant',
+      verifiedAt: new Date().toISOString(),
+    })
+
+    sendJson(res, 200, {
+      status: 'verified',
+      runtimeBaseUrl,
+      checks,
+      requestId,
+      landingUrlSample: probe.landingUrl,
+      tenantId,
+      keyScope: 'tenant',
+      placementDefaults: {
+        placementId,
+      },
+    })
+  } catch (error) {
+    const failureCode = cleanText(error?.failureCode) || 'NETWORK_BLOCKED'
+    if (failureCode === 'AUTH_FORBIDDEN') {
+      checks.authOk = false
+    }
+    sendJson(res, 200, {
+      status: 'failed',
+      runtimeBaseUrl,
+      checks,
+      requestId,
+      failureCode,
+    })
+  }
+}
+
+function handleSdkBootstrap(req, res) {
+  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
+  if (!authorization) {
+    sendJson(res, 401, {
+      error: {
+        code: 'AUTH_FORBIDDEN',
+        message: 'Authorization header is required.',
+      },
+    })
+    return
+  }
+
+  const binding = getBoundRuntimeByAuthorization(authorization)
+  if (!binding) {
+    sendJson(res, 404, {
+      error: {
+        code: 'RUNTIME_DOMAIN_NOT_BOUND',
+        message: 'Runtime domain is not bound for this API key.',
+      },
+    })
+    return
+  }
+
+  sendJson(res, 200, {
+    runtimeBaseUrl: binding.runtimeBaseUrl,
+    placementDefaults: {
+      placementId: binding.placementId || DEFAULT_PLACEMENT_ID,
+    },
+    tenantId: binding.tenantId,
+    keyScope: 'tenant',
+  })
+}
+
+function stripResponseHopByHopHeaders(responseHeaders = {}) {
+  const output = {}
+  for (const [key, value] of Object.entries(responseHeaders || {})) {
+    const normalizedKey = String(key || '').toLowerCase()
+    if (HOP_BY_HOP_HEADERS.has(normalizedKey)) continue
+    output[key] = value
+  }
+  return output
+}
+
+async function handleRuntimeBidProxy(req, res) {
+  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
+  if (!authorization) {
+    sendJson(res, 401, {
+      error: {
+        code: 'AUTH_FORBIDDEN',
+        message: 'Authorization header is required.',
+      },
+    })
+    return
+  }
+
+  const binding = getBoundRuntimeByAuthorization(authorization)
+  if (!binding?.runtimeBaseUrl) {
+    sendJson(res, 404, {
+      error: {
+        code: 'RUNTIME_DOMAIN_NOT_BOUND',
+        message: 'Runtime domain is not bound for this API key.',
+      },
+    })
+    return
+  }
+
+  const deps = getRuntimeDeps()
+  const requestBody = await readRequestBody(req)
+  const headers = buildUpstreamHeaders(req)
+  headers.authorization = authorization
+
+  try {
+    const upstreamResponse = await deps.fetch(`${binding.runtimeBaseUrl}/api/v2/bid`, {
+      method: 'POST',
+      headers,
+      body: requestBody,
+    })
+
+    const contentType = cleanText(upstreamResponse.headers.get('content-type')).toLowerCase()
+    const status = Number(upstreamResponse.status || 500)
+    if (!contentType.includes('application/json')) {
+      const passthroughBuffer = Buffer.from(await upstreamResponse.arrayBuffer())
+      res.statusCode = status
+      res.setHeader('content-type', contentType || 'application/octet-stream')
+      res.end(passthroughBuffer)
+      return
+    }
+
+    const jsonPayload = await upstreamResponse.json().catch(() => null)
+    if (!jsonPayload || typeof jsonPayload !== 'object') {
+      sendJson(res, 502, {
+        error: {
+          code: 'BID_INVALID_RESPONSE',
+          message: 'Runtime bid response is not valid JSON.',
+        },
+      })
+      return
+    }
+
+    const { payload: normalizedPayload, landingUrl } = normalizeBidPayload(jsonPayload)
+    if (!landingUrl) {
+      sendJson(res, 502, {
+        error: {
+          code: 'BID_INVALID_RESPONSE',
+          message: 'Runtime bid response does not include landingUrl.',
+        },
+      })
+      return
+    }
+
+    const responseHeaders = stripResponseHopByHopHeaders(
+      Object.fromEntries(upstreamResponse.headers.entries()),
+    )
+    res.statusCode = status
+    for (const [key, value] of Object.entries(responseHeaders)) {
+      res.setHeader(key, value)
+    }
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify(normalizedPayload))
+  } catch {
+    sendJson(res, 502, {
+      error: {
+        code: 'NETWORK_BLOCKED',
+        message: 'Failed to reach runtime domain /api/v2/bid.',
+      },
+    })
+  }
+}
+
 export default async function dashboardApiProxyHandler(req, res) {
+  const method = cleanText(req.method || 'GET').toUpperCase()
+  const pathname = readReqPathname(req)
+
+  if (pathname === '/api/v1/public/runtime-domain/verify-and-bind' && method === 'POST') {
+    await handleRuntimeDomainVerifyAndBind(req, res)
+    return
+  }
+  if (pathname === '/api/v1/public/sdk/bootstrap' && method === 'GET') {
+    handleSdkBootstrap(req, res)
+    return
+  }
+  if (pathname === '/api/v2/bid' && method === 'POST') {
+    await handleRuntimeBidProxy(req, res)
+    return
+  }
+
   const upstreamBaseUrl = resolveUpstreamBaseUrl()
   if (!upstreamBaseUrl) {
     sendJson(res, 500, {

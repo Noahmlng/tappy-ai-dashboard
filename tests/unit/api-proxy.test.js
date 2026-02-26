@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
 
 import dashboardApiProxyHandler, {
   buildUpstreamHeaders,
   buildUpstreamUrl,
+  clearRuntimeDomainBindingsForTests,
   normalizeUpstreamBaseUrl,
+  normalizeBidPayload,
+  normalizeRuntimeDomain,
   resolveUpstreamBaseUrl,
+  setRuntimeDepsForTests,
 } from '../../api/[...path].js'
 
 function createMockRes() {
@@ -72,6 +77,8 @@ beforeEach(() => {
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV }
   vi.restoreAllMocks()
+  clearRuntimeDomainBindingsForTests()
+  setRuntimeDepsForTests(null)
 })
 
 describe('api proxy helpers', () => {
@@ -115,9 +122,52 @@ describe('api proxy helpers', () => {
     expect(headers.authorization).toBe('Bearer x')
     expect(headers['x-forwarded-origin']).toBe('https://dashboard.example.com')
   })
+
+  it('normalizes runtime domain and rejects unsafe placeholders', () => {
+    expect(normalizeRuntimeDomain('customer-runtime.example.org')).toMatchObject({
+      ok: true,
+      hostname: 'customer-runtime.example.org',
+      runtimeBaseUrl: 'https://customer-runtime.example.org',
+    })
+    expect(normalizeRuntimeDomain('https://runtime.example.com')).toMatchObject({
+      ok: false,
+      failureCode: 'CNAME_MISMATCH',
+    })
+    expect(normalizeRuntimeDomain('localhost')).toMatchObject({
+      ok: false,
+      failureCode: 'CNAME_MISMATCH',
+    })
+  })
+
+  it('normalizes bid payload landing url from fallback fields', () => {
+    const fromLink = normalizeBidPayload({
+      requestId: 'req_1',
+      link: 'https://ad.example.com/a',
+    })
+    expect(fromLink.landingUrl).toBe('https://ad.example.com/a')
+    expect(fromLink.payload.landingUrl).toBe('https://ad.example.com/a')
+
+    const fromMessage = normalizeBidPayload({
+      requestId: 'req_2',
+      message: 'Click https://ad.example.com/b now',
+    })
+    expect(fromMessage.landingUrl).toBe('https://ad.example.com/b')
+  })
 })
 
 describe('dashboardApiProxyHandler', () => {
+  function createTlsConnectStub() {
+    return vi.fn(() => {
+      const socket = new EventEmitter()
+      socket.destroy = vi.fn()
+      socket.end = vi.fn()
+      setTimeout(() => {
+        socket.emit('secureConnect')
+      }, 0)
+      return socket
+    })
+  }
+
   it('returns explicit error when upstream target is missing', async () => {
     delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
     delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
@@ -322,5 +372,136 @@ describe('dashboardApiProxyHandler', () => {
     expect(payload.password).toBe('secret')
     expect(payload.accountId).toMatch(/^org_demo_user_[a-z0-9]{6}$/)
     expect(res.statusCode).toBe(200)
+  })
+
+  it('verifies and binds runtime domain, then serves sdk bootstrap config', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
+        requestId: 'req_bid_probe',
+        url: 'https://ads.customer.example/landing',
+      })),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_1',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'runtime.customer-example.org',
+      placementId: 'chat_from_answer_v1',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+
+    expect(verifyRes.statusCode).toBe(200)
+    const verifyPayload = JSON.parse(verifyRes.body)
+    expect(verifyPayload.status).toBe('verified')
+    expect(verifyPayload.runtimeBaseUrl).toBe('https://runtime.customer-example.org')
+    expect(verifyPayload.checks).toMatchObject({
+      dnsOk: true,
+      cnameOk: true,
+      tlsOk: true,
+      connectOk: true,
+      authOk: true,
+      bidOk: true,
+      landingUrlOk: true,
+    })
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_1',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+    expect(bootstrapRes.statusCode).toBe(200)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      runtimeBaseUrl: 'https://runtime.customer-example.org',
+      keyScope: 'tenant',
+      placementDefaults: {
+        placementId: 'chat_from_answer_v1',
+      },
+    })
+  })
+
+  it('returns structured failure when runtime domain DNS is not resolvable', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue([]),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockRejectedValue(new Error('ENOTFOUND')),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn(),
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_2',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'not-resolvable.customer-example.org',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+
+    expect(verifyRes.statusCode).toBe(200)
+    expect(JSON.parse(verifyRes.body)).toMatchObject({
+      status: 'failed',
+      failureCode: 'DNS_ENOTFOUND',
+    })
+  })
+
+  it('normalizes runtime bid response to include landingUrl', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      const normalized = String(url)
+      if (normalized.endsWith('/api/v2/bid')) {
+        return createJsonUpstreamResponse({
+          requestId: 'req_runtime_1',
+          ad: {
+            title: 'Great deal',
+            url: 'https://ads.customer.example/deal',
+          },
+        })
+      }
+      throw new Error(`Unexpected runtime URL: ${normalized}`)
+    })
+
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['203.0.113.12']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: fetchMock,
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_3',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'runtime.customer-3.org',
+    }
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body).status).toBe('verified')
+
+    const bidReq = createMockReq('/api/v2/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_3',
+      'content-type': 'application/json',
+    })
+    bidReq.body = { placementId: 'chat_from_answer_v1', messages: [] }
+
+    const bidRes = createMockRes()
+    await dashboardApiProxyHandler(bidReq, bidRes)
+
+    expect(bidRes.statusCode).toBe(200)
+    const payload = JSON.parse(bidRes.body)
+    expect(payload.landingUrl).toBe('https://ads.customer.example/deal')
+    expect(payload.ad.landingUrl).toBe('https://ads.customer.example/deal')
   })
 })
