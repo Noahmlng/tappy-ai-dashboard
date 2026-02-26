@@ -107,10 +107,10 @@ describe('api proxy helpers', () => {
     })).toBe('https://prod.example.com/api')
   })
 
-  it('derives managed runtime base url from upstream api base when explicit override is absent', () => {
+  it('resolves managed runtime base url only from explicit runtime fallback env', () => {
     expect(resolveManagedRuntimeBaseUrl({
       MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
-    })).toBe('https://prod.example.com')
+    })).toBe('')
 
     expect(resolveManagedRuntimeBaseUrl({
       MEDIATION_MANAGED_RUNTIME_BASE_URL: 'https://runtime-managed.example.com/base',
@@ -523,6 +523,7 @@ describe('dashboardApiProxyHandler', () => {
 
   it('returns managed runtime base from bootstrap when binding is pending and fallback is enabled', async () => {
     process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
+    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
 
     setRuntimeDepsForTests({
       resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
@@ -558,7 +559,7 @@ describe('dashboardApiProxyHandler', () => {
     expect(bootstrapRes.statusCode).toBe(200)
     expect(JSON.parse(bootstrapRes.body)).toMatchObject({
       runtimeSource: 'managed_fallback',
-      runtimeBaseUrl: 'https://prod.example.com',
+      runtimeBaseUrl: 'https://runtime-managed.example.com',
       customerRuntimeBaseUrl: 'https://simple-chatbot-phi.vercel.app',
       bindStatus: 'pending',
     })
@@ -783,6 +784,7 @@ describe('dashboardApiProxyHandler', () => {
 
   it('routes /api/v2/bid to managed fallback endpoint when bound domain is pending with endpoint mismatch', async () => {
     process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
+    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
 
     const fetchMock = vi.fn(async (url) => {
       const normalized = String(url)
@@ -793,7 +795,7 @@ describe('dashboardApiProxyHandler', () => {
           },
         }, 404)
       }
-      if (normalized === 'https://prod.example.com/api/v2/bid') {
+      if (normalized === 'https://runtime-managed.example.com/api/v2/bid') {
         return createJsonUpstreamResponse({
           requestId: 'req_managed_1',
           landingUrl: 'https://ads.customer.example/managed',
@@ -842,7 +844,7 @@ describe('dashboardApiProxyHandler', () => {
       landingUrl: 'https://ads.customer.example/managed',
     })
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://prod.example.com/api/v2/bid',
+      'https://runtime-managed.example.com/api/v2/bid',
       expect.objectContaining({
         method: 'POST',
       }),

@@ -58,7 +58,7 @@ npm run build
 - `MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK` (optional)
   Default: `1` (enabled). Set to `0` to disable managed runtime fallback when customer runtime probe is pending.
 - `MEDIATION_MANAGED_RUNTIME_BASE_URL` (optional)
-  Override for managed fallback base URL. If unset, derived from `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
+  Explicit managed runtime base URL for fallback mode. If unset, managed fallback is disabled.
 
 ## Onboarding Contract
 

@@ -726,13 +726,9 @@ function normalizePublicBaseUrl(rawValue) {
 
 export function resolveManagedRuntimeBaseUrl(env = process.env) {
   const explicit = normalizePublicBaseUrl(env.MEDIATION_MANAGED_RUNTIME_BASE_URL)
-  if (explicit) return explicit
-
-  const upstreamBaseUrl = resolveUpstreamBaseUrl(env)
-  if (!upstreamBaseUrl) return ''
-
+  if (!explicit) return ''
   try {
-    const parsed = new URL(upstreamBaseUrl)
+    const parsed = new URL(explicit)
     const pathname = parsed.pathname.replace(/\/$/, '')
     parsed.pathname = pathname.endsWith('/api')
       ? (pathname.slice(0, -4) || '/')
@@ -762,7 +758,9 @@ function buildManagedBidTargetUrl(upstreamBaseUrl) {
   try {
     const target = new URL(normalizedUpstreamBaseUrl)
     const basePath = target.pathname.replace(/\/$/, '')
-    target.pathname = `${basePath}/v2/bid`
+    target.pathname = basePath.endsWith('/api')
+      ? `${basePath}/v2/bid`
+      : `${basePath}/api/v2/bid`
     target.search = ''
     target.hash = ''
     return target.toString()
@@ -1532,9 +1530,9 @@ async function handleRuntimeBidProxy(req, res) {
     && shouldUseManagedRuntimeFallback(binding)
   )
 
-  const upstreamBaseUrl = canUseManagedFallback ? resolveUpstreamBaseUrl() : ''
+  const managedRuntimeBaseUrl = canUseManagedFallback ? resolveManagedRuntimeBaseUrl() : ''
   const managedTargetUrl = canUseManagedFallback
-    ? buildManagedBidTargetUrl(upstreamBaseUrl)
+    ? buildManagedBidTargetUrl(managedRuntimeBaseUrl)
     : ''
   const targetUrl = managedTargetUrl || (directRuntimeUrl ? `${directRuntimeUrl}/api/v2/bid` : '')
   const usingManagedFallback = Boolean(managedTargetUrl)
