@@ -33,6 +33,7 @@ npm run build
 
 ```bash
 npm run check:env
+npm run check:dead-code
 npm run lint
 npm test
 npm run test:smoke
@@ -64,3 +65,13 @@ Dashboard auth uses cookie sessions.
    - `VERCEL_PROJECT_ID`
    - `NODE_AUTH_TOKEN` (optional, only if private npm packages are required)
 4. PRs deploy Preview; pushes to `main` deploy Production.
+
+## Ongoing Hygiene
+
+- `dependabot.yml` opens weekly npm/actions update PRs.
+- `hygiene-weekly.yml` runs weekly safety checks:
+  - env contract
+  - dead code scan
+  - lint + unit + smoke
+  - build regression
+  - production dependency audit

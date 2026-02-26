@@ -1,0 +1,46 @@
+name: hygiene-weekly
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+jobs:
+  weekly-health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Environment Contract Check
+        run: npm run check:env
+
+      - name: Dead Code Check
+        run: npm run check:dead-code
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit Tests
+        run: npm test
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Smoke Tests
+        run: npm run test:smoke
+
+      - name: Build
+        run: npm run build
+
+      - name: Production Dependency Audit
+        run: npm audit --omit=dev --audit-level=high

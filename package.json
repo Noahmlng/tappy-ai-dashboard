@@ -12,7 +12,8 @@
     "format": "prettier --write --experimental-cli src/",
     "test": "vitest run",
     "test:smoke": "playwright test",
-    "check:env": "node scripts/check-env.mjs"
+    "check:env": "node scripts/check-env.mjs",
+    "check:dead-code": "node scripts/check-dead-code.mjs"
   },
   "dependencies": {
     "vue": "^3.5.26",
