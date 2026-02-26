@@ -63,7 +63,7 @@ npm run build
 ## Onboarding Contract
 
 - SDK/backend integration requires `MEDIATION_API_KEY`.
-- `MEDIATION_BOOTSTRAP_ORIGIN` is optional and only used to override the default hosted bootstrap origin (for private/self-hosted setups).
+- Hosted bootstrap origin is fixed at `https://tappy-ai-dashboard.vercel.app/api/v1/public/sdk/bootstrap` in the integration snippet, so no extra bootstrap env is required in normal onboarding.
 - `verify-and-bind` now returns `status: verified | pending | failed`.
 - `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
 - When bind status is `pending`, `sdk/bootstrap` can return `runtimeSource=managed_fallback` and a managed `runtimeBaseUrl` so SDK integration still works while custom runtime is being fixed.
