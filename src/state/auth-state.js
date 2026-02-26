@@ -11,12 +11,34 @@ function normalizeOnboarding(source = {}) {
   }
 }
 
+function pickScopeValue(...values) {
+  for (const value of values) {
+    const normalized = String(value || '').trim()
+    if (normalized) return normalized
+  }
+  return ''
+}
+
 function resolveOnboarding(payload = {}, user = {}, scope = {}) {
   const explicit = normalizeOnboarding(payload?.onboarding || {})
   if (explicit.status === 'verified') return explicit
 
-  const accountId = String(scope?.accountId || user?.accountId || '').trim()
-  const appId = String(scope?.appId || user?.appId || '').trim()
+  const accountId = pickScopeValue(
+    scope?.accountId,
+    scope?.account_id,
+    scope?.organizationId,
+    scope?.organization_id,
+    user?.accountId,
+    user?.account_id,
+    user?.organizationId,
+    user?.organization_id,
+  )
+  const appId = pickScopeValue(
+    scope?.appId,
+    scope?.app_id,
+    user?.appId,
+    user?.app_id,
+  )
   if (accountId && appId) {
     return {
       status: 'verified',
@@ -28,8 +50,22 @@ function resolveOnboarding(payload = {}, user = {}, scope = {}) {
 }
 
 function applyScopeFromUser(user = {}, scope = {}) {
-  const accountId = String(scope.accountId || user.accountId || '').trim()
-  const appId = String(scope.appId || user.appId || '').trim()
+  const accountId = pickScopeValue(
+    scope?.accountId,
+    scope?.account_id,
+    scope?.organizationId,
+    scope?.organization_id,
+    user?.accountId,
+    user?.account_id,
+    user?.organizationId,
+    user?.organization_id,
+  )
+  const appId = pickScopeValue(
+    scope?.appId,
+    scope?.app_id,
+    user?.appId,
+    user?.app_id,
+  )
   if (!accountId) return
 
   setScope({

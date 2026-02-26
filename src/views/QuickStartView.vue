@@ -100,7 +100,16 @@ async function runQuickStartVerifier() {
   verifyResult.value = null
 
   try {
-    const payload = await controlPlaneClient.quickStart.verify()
+    const verifyInput = {
+      environment: 'prod',
+      placementId,
+    }
+    const accountId = String(scopeState.accountId || '').trim()
+    const appId = String(scopeState.appId || '').trim()
+    if (accountId) verifyInput.accountId = accountId
+    if (appId) verifyInput.appId = appId
+
+    const payload = await controlPlaneClient.quickStart.verify(verifyInput)
     verifyResult.value = payload
 
     const status = String(payload?.status || '').trim().toLowerCase()
