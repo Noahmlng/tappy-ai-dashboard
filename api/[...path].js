@@ -44,6 +44,28 @@ const PROBE_HEADERS_MAX_KEYS = 2
 const PROBE_HEADERS_MAX_BYTES = 2_048
 const DEFAULT_BIND_STATUS = 'pending'
 const UNBOUND_BIND_STATUS = 'unbound'
+const REMOVED_RUNTIME_ROUTES = Object.freeze({
+  '/api/v1/public/sdk/bootstrap': {
+    method: 'GET',
+    code: 'BOOTSTRAP_REMOVED',
+    message: 'Bootstrap has been removed. Use runtime key and POST /api/v2/bid directly.',
+  },
+  '/api/v1/public/runtime-domain/verify-and-bind': {
+    method: 'POST',
+    code: 'RUNTIME_BIND_FLOW_REMOVED',
+    message: 'Runtime bind flow has been removed. Use runtime key and POST /api/v2/bid directly.',
+  },
+  '/api/v1/public/runtime-domain/probe': {
+    method: 'POST',
+    code: 'RUNTIME_BIND_FLOW_REMOVED',
+    message: 'Runtime bind flow has been removed. Use runtime key and POST /api/v2/bid directly.',
+  },
+  '/api/ad/bid': {
+    method: 'POST',
+    code: 'AD_BID_ROUTE_REMOVED',
+    message: 'Legacy /api/ad/bid has been removed. Use POST /api/v2/bid directly.',
+  },
+})
 
 const runtimeDomainBindings = new Map()
 const runtimeBindingCache = new Map()
@@ -1114,6 +1136,10 @@ export function resolveUpstreamBaseUrl(env = process.env) {
   return ''
 }
 
+export function resolveRuntimeApiBaseUrl(env = process.env) {
+  return normalizeUpstreamBaseUrl(env.MEDIATION_RUNTIME_API_BASE_URL)
+}
+
 function normalizePublicBaseUrl(rawValue) {
   const input = cleanText(rawValue)
   if (!input) return ''
@@ -2143,13 +2169,14 @@ async function handleRuntimeBidProxy(req, res) {
     })
     return
   }
-
-  const binding = await getRuntimeBindingByAuthorization(authorization)
-  const route = resolveRuntimeRoute(binding, {
-    authorization,
-  })
-  if (!route.ok) {
-    sendJson(res, 503, buildRuntimeRouteError(route, createRequestId('req_runtime_route')))
+  const runtimeApiBaseUrl = resolveRuntimeApiBaseUrl()
+  if (!runtimeApiBaseUrl) {
+    sendJson(res, 500, {
+      error: {
+        code: 'PROXY_RUNTIME_TARGET_NOT_CONFIGURED',
+        message: 'Set MEDIATION_RUNTIME_API_BASE_URL to your runtime API origin (with or without /api suffix).',
+      },
+    })
     return
   }
 
@@ -2157,21 +2184,17 @@ async function handleRuntimeBidProxy(req, res) {
   const requestBody = await readRequestBody(req)
   const headers = buildUpstreamHeaders(req)
   headers.authorization = authorization
-  headers['x-tappy-tenant-id'] = cleanText(route.tenantId)
-  headers['x-tappy-bind-status'] = cleanText(route.bindStatus)
-  headers['x-tappy-runtime-source'] = cleanText(route.runtimeSource)
-
-  const targetUrl = `${cleanText(route.runtimeBaseUrl)}/api/v2/bid`
+  const targetUrl = `${runtimeApiBaseUrl}/v2/bid`
   const bidResult = await requestRuntimeBid({
     deps,
     targetUrl,
     requestBody,
     headers,
-    usingManagedRuntime: route.runtimeSource.startsWith('managed'),
+    usingManagedRuntime: false,
   })
 
   if (!bidResult.ok) {
-    res.setHeader('x-tappy-runtime-source', route.runtimeSource)
+    res.setHeader('x-tappy-runtime-source', 'runtime_api_base_url')
     sendJson(res, Number(bidResult.status || 502), {
       error: {
         code: cleanText(bidResult.errorCode || 'NETWORK_BLOCKED'),
@@ -2181,7 +2204,7 @@ async function handleRuntimeBidProxy(req, res) {
     return
   }
 
-  res.setHeader('x-tappy-runtime-source', route.runtimeSource)
+  res.setHeader('x-tappy-runtime-source', 'runtime_api_base_url')
   if (bidResult.passthrough) {
     res.statusCode = Number(bidResult.status || 200)
     for (const [key, value] of Object.entries(bidResult.responseHeaders || {})) {
@@ -2288,24 +2311,20 @@ export default async function dashboardApiProxyHandler(req, res) {
   const method = cleanText(req.method || 'GET').toUpperCase()
   const pathname = readReqPathname(req)
 
-  if (pathname === '/api/v1/public/runtime-domain/verify-and-bind' && method === 'POST') {
-    await handleRuntimeDomainVerifyAndBind(req, res)
-    return
-  }
-  if (pathname === '/api/v1/public/runtime-domain/probe' && method === 'POST') {
-    await handleRuntimeDomainProbe(req, res)
-    return
-  }
-  if (pathname === '/api/v1/public/sdk/bootstrap' && method === 'GET') {
-    await handleSdkBootstrap(req, res)
-    return
+  if (Object.prototype.hasOwnProperty.call(REMOVED_RUNTIME_ROUTES, pathname)) {
+    const policy = REMOVED_RUNTIME_ROUTES[pathname]
+    if (method === String(policy?.method || '').toUpperCase()) {
+      sendJson(res, 410, {
+        error: {
+          code: cleanText(policy.code),
+          message: cleanText(policy.message),
+        },
+      })
+      return
+    }
   }
   if (pathname === '/api/v2/bid' && method === 'POST') {
     await handleRuntimeBidProxy(req, res)
-    return
-  }
-  if (pathname === '/api/ad/bid' && method === 'POST') {
-    await handleAdBid(req, res)
     return
   }
 

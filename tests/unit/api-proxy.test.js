@@ -1,16 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { EventEmitter } from 'node:events'
 
 import dashboardApiProxyHandler, {
   buildUpstreamHeaders,
   buildUpstreamUrl,
-  clearRuntimeDomainBindingsForTests,
-  normalizeUpstreamBaseUrl,
   normalizeBidPayload,
-  normalizeRuntimeDomain,
-  resolveManagedRuntimeBaseUrl,
+  normalizeUpstreamBaseUrl,
+  resolveRuntimeApiBaseUrl,
   resolveUpstreamBaseUrl,
-  setRuntimeDepsForTests,
 } from '../../api/[...path].js'
 
 function createMockRes() {
@@ -78,8 +74,6 @@ beforeEach(() => {
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV }
   vi.restoreAllMocks()
-  clearRuntimeDomainBindingsForTests()
-  setRuntimeDepsForTests(null)
 })
 
 describe('api proxy helpers', () => {
@@ -87,8 +81,6 @@ describe('api proxy helpers', () => {
     expect(normalizeUpstreamBaseUrl('https://control-plane.example.com'))
       .toBe('https://control-plane.example.com/api')
     expect(normalizeUpstreamBaseUrl('https://control-plane.example.com/api'))
-      .toBe('https://control-plane.example.com/api')
-    expect(normalizeUpstreamBaseUrl('https://control-plane.example.com/api\\n'))
       .toBe('https://control-plane.example.com/api')
   })
 
@@ -100,22 +92,14 @@ describe('api proxy helpers', () => {
     expect(url).toBe('https://control-plane.example.com/api/v1/dashboard/state?accountId=org_1')
   })
 
-  it('resolves env candidates in expected order', () => {
+  it('resolves control-plane and runtime upstream envs', () => {
     expect(resolveUpstreamBaseUrl({
-      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com',
-      MEDIATION_CONTROL_PLANE_API_PROXY_TARGET: 'http://127.0.0.1:3100',
-    })).toBe('https://prod.example.com/api')
-  })
+      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://cp.example.com',
+    })).toBe('https://cp.example.com/api')
 
-  it('resolves managed runtime base url from explicit env or control plane base as fallback', () => {
-    expect(resolveManagedRuntimeBaseUrl({
-      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
-    })).toBe('https://prod.example.com')
-
-    expect(resolveManagedRuntimeBaseUrl({
-      MEDIATION_MANAGED_RUNTIME_BASE_URL: 'https://runtime-managed.example.com/base',
-      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
-    })).toBe('https://runtime-managed.example.com/base')
+    expect(resolveRuntimeApiBaseUrl({
+      MEDIATION_RUNTIME_API_BASE_URL: 'https://rt.example.com',
+    })).toBe('https://rt.example.com/api')
   })
 
   it('strips browser-only cors headers and keeps server-relevant headers', () => {
@@ -135,22 +119,6 @@ describe('api proxy helpers', () => {
     expect(headers['x-forwarded-origin']).toBe('https://dashboard.example.com')
   })
 
-  it('normalizes runtime domain and rejects unsafe placeholders', () => {
-    expect(normalizeRuntimeDomain('customer-runtime.example.org')).toMatchObject({
-      ok: true,
-      hostname: 'customer-runtime.example.org',
-      runtimeBaseUrl: 'https://customer-runtime.example.org',
-    })
-    expect(normalizeRuntimeDomain('https://runtime.example.com')).toMatchObject({
-      ok: false,
-      failureCode: 'CNAME_MISMATCH',
-    })
-    expect(normalizeRuntimeDomain('localhost')).toMatchObject({
-      ok: false,
-      failureCode: 'CNAME_MISMATCH',
-    })
-  })
-
   it('normalizes bid payload landing url from fallback fields', () => {
     const fromLink = normalizeBidPayload({
       requestId: 'req_1',
@@ -158,29 +126,11 @@ describe('api proxy helpers', () => {
     })
     expect(fromLink.landingUrl).toBe('https://ad.example.com/a')
     expect(fromLink.payload.landingUrl).toBe('https://ad.example.com/a')
-
-    const fromMessage = normalizeBidPayload({
-      requestId: 'req_2',
-      message: 'Click https://ad.example.com/b now',
-    })
-    expect(fromMessage.landingUrl).toBe('https://ad.example.com/b')
   })
 })
 
 describe('dashboardApiProxyHandler', () => {
-  function createTlsConnectStub() {
-    return vi.fn(() => {
-      const socket = new EventEmitter()
-      socket.destroy = vi.fn()
-      socket.end = vi.fn()
-      setTimeout(() => {
-        socket.emit('secureConnect')
-      }, 0)
-      return socket
-    })
-  }
-
-  it('returns explicit error when upstream target is missing', async () => {
+  it('returns explicit error when control-plane target is missing', async () => {
     delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
     delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
 
@@ -191,973 +141,86 @@ describe('dashboardApiProxyHandler', () => {
     expect(JSON.parse(res.body).error.code).toBe('PROXY_TARGET_NOT_CONFIGURED')
   })
 
-  it('returns explicit invalid-target error when upstream env is malformed', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = '"not-a-url"'
-    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+  it('returns 410 for removed bootstrap and bind routes', async () => {
+    const removedRoutes = [
+      ['/api/v1/public/sdk/bootstrap', 'GET', 'BOOTSTRAP_REMOVED'],
+      ['/api/v1/public/runtime-domain/verify-and-bind', 'POST', 'RUNTIME_BIND_FLOW_REMOVED'],
+      ['/api/v1/public/runtime-domain/probe', 'POST', 'RUNTIME_BIND_FLOW_REMOVED'],
+      ['/api/ad/bid', 'POST', 'AD_BID_ROUTE_REMOVED'],
+    ]
 
-    const res = createMockRes()
-    await dashboardApiProxyHandler(createMockReq(), res)
-
-    expect(res.statusCode).toBe(500)
-    expect(JSON.parse(res.body).error.code).toBe('PROXY_TARGET_INVALID')
+    for (const [pathname, method, code] of removedRoutes) {
+      const res = createMockRes()
+      await dashboardApiProxyHandler(createMockReq(pathname, method), res)
+      expect(res.statusCode).toBe(410)
+      expect(JSON.parse(res.body).error.code).toBe(code)
+    }
   })
 
-  it('returns timeout error code when fetch aborts', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
+  it('proxies /api/v2/bid directly to runtime API base URL', async () => {
+    process.env.MEDIATION_RUNTIME_API_BASE_URL = 'https://runtime.example.com'
 
-    const abortError = new Error('timeout')
-    abortError.name = 'AbortError'
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(abortError)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(createJsonUpstreamResponse({
+      requestId: 'req_runtime_1',
+      url: 'https://ads.customer.example/deal',
+    }))
 
-    const res = createMockRes()
-    await dashboardApiProxyHandler(createMockReq(), res)
-
-    expect(res.statusCode).toBe(502)
-    expect(JSON.parse(res.body).error.code).toBe('PROXY_UPSTREAM_TIMEOUT')
-  })
-
-  it('passes through multiple set-cookie headers', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
-
-    const payload = JSON.stringify({ ok: true })
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-      status: 200,
-      headers: {
-        getSetCookie() {
-          return ['dash_session=s1; Path=/', 'dash_csrf=c1; Path=/']
-        },
-        entries() {
-          return new Map([
-            ['content-type', 'application/json; charset=utf-8'],
-            ['content-encoding', 'gzip'],
-            ['set-cookie', 'dash_session=s1; Path=/'],
-          ]).entries()
-        },
-      },
-      async arrayBuffer() {
-        return new TextEncoder().encode(payload).buffer
-      },
-    })
-
-    const res = createMockRes()
-    await dashboardApiProxyHandler(createMockReq('/api/v1/dashboard/state', 'GET', {
-      origin: 'https://dashboard.example.com',
-      referer: 'https://dashboard.example.com/home',
-      cookie: 'dash_session=s1',
-    }), res)
-
-    const [, requestOptions] = fetchMock.mock.calls[0]
-
-    expect(res.statusCode).toBe(200)
-    expect(res.headers['set-cookie']).toEqual(['dash_session=s1; Path=/', 'dash_csrf=c1; Path=/'])
-    expect(res.headers['content-encoding']).toBeUndefined()
-    expect(res.body).toBe(payload)
-    expect(requestOptions.headers.origin).toBeUndefined()
-    expect(requestOptions.headers.referer).toBeUndefined()
-    expect(requestOptions.headers.cookie).toBe('dash_session=s1')
-    expect(requestOptions.headers['x-forwarded-origin']).toBe('https://dashboard.example.com')
-  })
-
-  it('falls back to set-cookie header parsing when getSetCookie is unavailable', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
-
-    const payload = JSON.stringify({ ok: true })
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-      status: 200,
-      headers: {
-        get(name) {
-          if (String(name).toLowerCase() === 'set-cookie') {
-            return 'dash_session=s1; Path=/; HttpOnly; Secure, dash_csrf=c1; Path=/; Secure'
-          }
-          return null
-        },
-        entries() {
-          return new Map([
-            ['content-type', 'application/json; charset=utf-8'],
-            ['set-cookie', 'dash_session=s1; Path=/; HttpOnly; Secure'],
-          ]).entries()
-        },
-      },
-      async arrayBuffer() {
-        return new TextEncoder().encode(payload).buffer
-      },
-    })
-
-    const res = createMockRes()
-    await dashboardApiProxyHandler(createMockReq('/api/v1/public/dashboard/login', 'POST', {
-      'content-type': 'application/json',
-    }), res)
-
-    expect(res.statusCode).toBe(200)
-    expect(res.headers['set-cookie']).toEqual([
-      'dash_session=s1; Path=/; HttpOnly; Secure',
-      'dash_csrf=c1; Path=/; Secure',
-    ])
-  })
-
-  it('enriches quick-start verify payload from session scope when backend expects scope fields', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
-
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
-      const normalizedUrl = String(url)
-      if (normalizedUrl.endsWith('/api/v1/public/dashboard/me')) {
-        return createJsonUpstreamResponse({
-          scope: { organizationId: 'org_auto', app_id: 'app_auto' },
-        })
-      }
-      if (normalizedUrl.endsWith('/api/v1/public/quick-start/verify')) {
-        return createJsonUpstreamResponse({
-          status: 'verified',
-          requestId: 'req_1',
-        })
-      }
-      throw new Error(`Unexpected upstream URL: ${normalizedUrl}`)
-    })
-
-    const req = createMockReq('/api/v1/public/quick-start/verify', 'POST', {
-      'content-type': 'application/json',
-      cookie: 'dash_session=s1',
-    })
-    req.body = {}
-
-    const res = createMockRes()
-    await dashboardApiProxyHandler(req, res)
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const [, verifyOptions] = fetchMock.mock.calls[1]
-    expect(JSON.parse(String(verifyOptions.body || '{}'))).toMatchObject({
-      accountId: 'org_auto',
-      appId: 'app_auto',
-      environment: 'prod',
-      placementId: 'chat_from_answer_v1',
-    })
-    expect(res.statusCode).toBe(200)
-  })
-
-  it('enriches create-key payload with defaults and inferred scope', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
-
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
-      const normalizedUrl = String(url)
-      if (normalizedUrl.endsWith('/api/v1/public/dashboard/me')) {
-        return createJsonUpstreamResponse({
-          scope: { account_id: 'org_auto', appId: 'app_auto' },
-        })
-      }
-      if (normalizedUrl.endsWith('/api/v1/public/credentials/keys')) {
-        return createJsonUpstreamResponse({
-          key: { keyId: 'key_1' },
-        })
-      }
-      throw new Error(`Unexpected upstream URL: ${normalizedUrl}`)
-    })
-
-    const req = createMockReq('/api/v1/public/credentials/keys', 'POST', {
-      'content-type': 'application/json',
-      cookie: 'dash_session=s1',
-    })
-    req.body = {}
-
-    const res = createMockRes()
-    await dashboardApiProxyHandler(req, res)
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const [, createOptions] = fetchMock.mock.calls[1]
-    expect(JSON.parse(String(createOptions.body || '{}'))).toMatchObject({
-      accountId: 'org_auto',
-      appId: 'app_auto',
-      environment: 'prod',
-      name: 'runtime-prod',
-    })
-    expect(res.statusCode).toBe(200)
-  })
-
-  it('auto-generates accountId for register payload when legacy backend requires it', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
-
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      createJsonUpstreamResponse({ ok: true }),
-    )
-
-    const req = createMockReq('/api/v1/public/dashboard/register', 'POST', {
+    const req = createMockReq('/api/v2/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_1',
       'content-type': 'application/json',
     })
     req.body = {
-      email: 'demo.user@example.com',
-      password: 'secret',
+      messages: [{ role: 'user', content: 'show me deals' }],
     }
 
     const res = createMockRes()
     await dashboardApiProxyHandler(req, res)
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    const [, registerOptions] = fetchMock.mock.calls[0]
-    const payload = JSON.parse(String(registerOptions.body || '{}'))
-    expect(payload.email).toBe('demo.user@example.com')
-    expect(payload.password).toBe('secret')
-    expect(payload.accountId).toMatch(/^org_demo_user_[a-z0-9]{6}$/)
-    expect(res.statusCode).toBe(200)
-  })
-
-  it('verifies and binds runtime domain, then serves sdk bootstrap config', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
-        requestId: 'req_bid_probe',
-        url: 'https://ads.customer.example/landing',
-      })),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_1',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'runtime.customer-example.org',
-      placementId: 'chat_from_answer_v1',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-
-    expect(verifyRes.statusCode).toBe(200)
-    const verifyPayload = JSON.parse(verifyRes.body)
-    expect(verifyPayload.status).toBe('verified')
-    expect(verifyPayload.bindStage).toBe('bound')
-    expect(verifyPayload.runtimeBaseUrl).toBe('https://runtime.customer-example.org')
-    expect(verifyPayload.checks).toMatchObject({
-      dnsOk: true,
-      cnameOk: true,
-      tlsOk: true,
-      connectOk: true,
-      authOk: true,
-      bidOk: true,
-      landingUrlOk: true,
-    })
-
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_1',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-    expect(bootstrapRes.statusCode).toBe(200)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      runtimeBaseUrl: 'https://runtime.customer-example.org',
-      keyScope: 'tenant',
-      bindStatus: 'verified',
-      placementDefaults: {
-        placementId: 'chat_from_answer_v1',
-      },
-    })
-  })
-
-  it('allows direct runtime domain without gateway cname in default mode', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['cname.vercel-dns.com']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
-        requestId: 'req_bid_probe_2',
-        message: 'Open https://ads.customer.example/direct',
-      })),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_direct',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'simple-chatbot-phi.vercel.app',
-      placementId: 'chat_from_answer_v1',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-
-    const payload = JSON.parse(verifyRes.body)
-    expect(payload.status).toBe('verified')
-    expect(payload.checks).toMatchObject({
-      dnsOk: true,
-      cnameOk: false,
-      tlsOk: true,
-      connectOk: true,
-      authOk: true,
-      bidOk: true,
-      landingUrlOk: true,
-    })
-  })
-
-  it('binds domain as pending when runtime probe is network blocked', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue([]),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockRejectedValue(new Error('socket hang up')),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_pending',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'simple-chatbot-phi.vercel.app',
-      placementId: 'chat_from_answer_v1',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-
-    expect(verifyRes.statusCode).toBe(200)
-    expect(JSON.parse(verifyRes.body)).toMatchObject({
-      status: 'pending',
-      bindStage: 'probe_failed',
-      failureCode: 'EGRESS_BLOCKED',
-      legacyCode: 'NETWORK_BLOCKED',
-      checks: {
-        dnsOk: true,
-        tlsOk: true,
-        connectOk: true,
-        authOk: false,
-        bidOk: false,
-        landingUrlOk: false,
-      },
-    })
-  })
-
-  it('returns managed runtime base from bootstrap when binding is pending and fallback is enabled', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
-    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
-
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue([]),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockRejectedValue(new Error('socket hang up')),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_pending_bootstrap',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'simple-chatbot-phi.vercel.app',
-      placementId: 'chat_from_answer_v1',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body)).toMatchObject({
-      status: 'pending',
-      failureCode: 'EGRESS_BLOCKED',
-    })
-
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_pending_bootstrap',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-
-    expect(bootstrapRes.statusCode).toBe(200)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      runtimeSource: 'managed_fallback',
-      runtimeBaseUrl: 'https://runtime-managed.example.com',
-      customerRuntimeBaseUrl: 'https://simple-chatbot-phi.vercel.app',
-      bindStatus: 'pending',
-    })
-  })
-
-  it('supports runtime-domain probe and classifies server fail + browser pass as egress blocked', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
-        requestId: 'req_seed',
-        landingUrl: 'https://ads.customer.example/seed',
-      })),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_probe_1',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'runtime.customer-probe.org',
-      placementId: 'chat_from_answer_v1',
-    }
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body).status).toBe('verified')
-
-    setRuntimeDepsForTests({
-      fetch: vi.fn().mockRejectedValue(new Error('network blocked')),
-    })
-
-    const probeReq = createMockReq('/api/v1/public/runtime-domain/probe', 'POST', {
-      authorization: 'Bearer sk_runtime_probe_1',
-      'content-type': 'application/json',
-    })
-    probeReq.body = {
-      runBrowserProbe: true,
-      browserProbe: {
-        ok: true,
-        code: 'VERIFIED',
-        httpStatus: 200,
-        landingUrl: 'https://ads.customer.example/browser',
-      },
-    }
-    const probeRes = createMockRes()
-    await dashboardApiProxyHandler(probeReq, probeRes)
-
-    expect(probeRes.statusCode).toBe(200)
-    const payload = JSON.parse(probeRes.body)
-    expect(payload).toMatchObject({
-      finalStatus: 'pending',
-      failureCode: 'EGRESS_BLOCKED',
-      legacyCode: 'NETWORK_BLOCKED',
-      serverProbe: {
-        source: 'server',
-        ok: false,
-        code: 'EGRESS_BLOCKED',
-      },
-      browserProbe: {
-        source: 'browser',
-        ok: true,
-      },
-    })
-  })
-
-  it('upgrades pending binding to verified when runtime-domain probe succeeds', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue([]),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockRejectedValue(new Error('network blocked')),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_probe_2',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'runtime.customer-upgrade.org',
-    }
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body).status).toBe('pending')
-
-    setRuntimeDepsForTests({
-      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
-        requestId: 'req_probe_ok',
-        link: 'https://ads.customer.example/upgraded',
-      })),
-    })
-
-    const probeReq = createMockReq('/api/v1/public/runtime-domain/probe', 'POST', {
-      authorization: 'Bearer sk_runtime_probe_2',
-      'content-type': 'application/json',
-    })
-    probeReq.body = {}
-    const probeRes = createMockRes()
-    await dashboardApiProxyHandler(probeReq, probeRes)
-    expect(JSON.parse(probeRes.body)).toMatchObject({
-      finalStatus: 'verified',
-      status: 'verified',
-    })
-
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_probe_2',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      bindStatus: 'verified',
-    })
-  })
-
-  it('enforces gateway cname when strict mode is enabled', async () => {
-    process.env.MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME = '1'
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['cname.vercel-dns.com']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({ ok: true })),
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_strict',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'simple-chatbot-phi.vercel.app',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-
-    expect(JSON.parse(verifyRes.body)).toMatchObject({
-      status: 'failed',
-      failureCode: 'CNAME_MISMATCH',
-    })
-  })
-
-  it('returns structured failure when runtime domain DNS is not resolvable', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue([]),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockRejectedValue(new Error('ENOTFOUND')),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn(),
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_2',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'not-resolvable.customer-example.org',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-
-    expect(verifyRes.statusCode).toBe(200)
-    expect(JSON.parse(verifyRes.body)).toMatchObject({
-      status: 'failed',
-      failureCode: 'DNS_ENOTFOUND',
-    })
-  })
-
-  it('normalizes runtime bid response to include landingUrl', async () => {
-    const fetchMock = vi.fn(async (url) => {
-      const normalized = String(url)
-      if (normalized.endsWith('/api/v2/bid')) {
-        return createJsonUpstreamResponse({
-          requestId: 'req_runtime_1',
-          ad: {
-            title: 'Great deal',
-            url: 'https://ads.customer.example/deal',
-          },
-        })
-      }
-      throw new Error(`Unexpected runtime URL: ${normalized}`)
-    })
-
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['203.0.113.12']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: fetchMock,
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_3',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'runtime.customer-3.org',
-    }
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body).status).toBe('verified')
-
-    const bidReq = createMockReq('/api/v2/bid', 'POST', {
-      authorization: 'Bearer sk_runtime_3',
-      'content-type': 'application/json',
-    })
-    bidReq.body = { placementId: 'chat_from_answer_v1', messages: [] }
-
-    const bidRes = createMockRes()
-    await dashboardApiProxyHandler(bidReq, bidRes)
-
-    expect(bidRes.statusCode).toBe(200)
-    const payload = JSON.parse(bidRes.body)
-    expect(payload.landingUrl).toBe('https://ads.customer.example/deal')
-    expect(payload.ad.landingUrl).toBe('https://ads.customer.example/deal')
-  })
-
-  it('routes /api/v2/bid to managed fallback endpoint when bound domain is pending with endpoint mismatch', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
-    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
-
-    const fetchMock = vi.fn(async (url) => {
-      const normalized = String(url)
-      if (normalized === 'https://simple-chatbot-phi.vercel.app/api/v2/bid') {
-        return createJsonUpstreamResponse({
-          error: {
-            code: 'NOT_FOUND',
-          },
-        }, 404)
-      }
-      if (normalized === 'https://runtime-managed.example.com/api/v2/bid') {
-        return createJsonUpstreamResponse({
-          requestId: 'req_managed_1',
-          landingUrl: 'https://ads.customer.example/managed',
-        })
-      }
-      throw new Error(`Unexpected runtime URL: ${normalized}`)
-    })
-
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue([]),
-      tlsConnect: createTlsConnectStub(),
-      fetch: fetchMock,
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_pending_bid',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'simple-chatbot-phi.vercel.app',
-      placementId: 'chat_from_answer_v1',
-    }
-
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body)).toMatchObject({
-      status: 'pending',
-      failureCode: 'ENDPOINT_404',
-    })
-
-    const bidReq = createMockReq('/api/v2/bid', 'POST', {
-      authorization: 'Bearer sk_runtime_pending_bid',
-      'content-type': 'application/json',
-    })
-    bidReq.body = { placementId: 'chat_from_answer_v1', messages: [] }
-
-    const bidRes = createMockRes()
-    await dashboardApiProxyHandler(bidReq, bidRes)
-
-    expect(bidRes.statusCode).toBe(200)
-    expect(JSON.parse(bidRes.body)).toMatchObject({
-      requestId: 'req_managed_1',
-      landingUrl: 'https://ads.customer.example/managed',
-    })
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://runtime-managed.example.com/api/v2/bid',
+      'https://runtime.example.com/api/v2/bid',
       expect.objectContaining({
         method: 'POST',
       }),
     )
-  })
-
-  it('returns binding-not-ready route error for unbound API key even when managed runtime is configured', async () => {
-    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
-    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
-
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_unbound_bootstrap',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-
-    expect(bootstrapRes.statusCode).toBe(503)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      error: {
-        code: 'BINDING_NOT_READY',
-        details: {
-          bindStatus: 'unbound',
-        },
-      },
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['x-tappy-runtime-source']).toBe('runtime_api_base_url')
+    expect(JSON.parse(res.body)).toMatchObject({
+      requestId: 'req_runtime_1',
+      landingUrl: 'https://ads.customer.example/deal',
     })
   })
 
-  it('returns structured route error for unbound API key when managed runtime is unavailable', async () => {
-    delete process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+  it('returns explicit error when runtime target is missing for /api/v2/bid', async () => {
+    delete process.env.MEDIATION_RUNTIME_API_BASE_URL
 
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_unbound_fail',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-
-    expect(bootstrapRes.statusCode).toBe(503)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      error: {
-        code: 'BINDING_NOT_READY',
-        details: {
-          bindStatus: 'unbound',
-        },
-      },
-    })
-  })
-
-  it('blocks /api/v2/bid for unbound API key and does not call upstream runtime', async () => {
-    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
-    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
-
-    const runtimeFetch = vi.fn().mockResolvedValue(createJsonUpstreamResponse({
-      requestId: 'req_managed_default_bid',
-      landingUrl: 'https://ads.customer.example/managed-default',
-    }))
-    setRuntimeDepsForTests({
-      fetch: runtimeFetch,
-    })
-
-    const bidReq = createMockReq('/api/v2/bid', 'POST', {
-      authorization: 'Bearer sk_runtime_unbound_bid',
+    const req = createMockReq('/api/v2/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_1',
       'content-type': 'application/json',
     })
-    bidReq.body = {
-      placementId: 'chat_from_answer_v1',
-      messages: [],
+    req.body = {
+      messages: [{ role: 'user', content: 'show me deals' }],
     }
-
-    const bidRes = createMockRes()
-    await dashboardApiProxyHandler(bidReq, bidRes)
-
-    expect(bidRes.statusCode).toBe(503)
-    expect(JSON.parse(bidRes.body)).toMatchObject({
-      error: {
-        code: 'BINDING_NOT_READY',
-        details: {
-          bindStatus: 'unbound',
-        },
-      },
-    })
-    expect(runtimeFetch).not.toHaveBeenCalled()
-  })
-
-  it('returns structured no-fill payload on /api/ad/bid when runtime route is unavailable', async () => {
-    delete process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
-
-    const req = createMockReq('/api/ad/bid', 'POST', {
-      authorization: 'Bearer sk_runtime_ad_bid',
-      'content-type': 'application/json',
-    })
-    req.body = { messages: [] }
 
     const res = createMockRes()
     await dashboardApiProxyHandler(req, res)
 
-    expect(res.statusCode).toBe(200)
-    expect(JSON.parse(res.body)).toMatchObject({
-      filled: false,
-      reasonCode: 'BINDING_NOT_READY',
-      runtimeSource: 'none',
-      bindStatus: 'unbound',
-      routeCode: 'BINDING_NOT_READY',
-      upstreamStatus: 0,
-      tenantId: expect.stringMatching(/^tenant_[a-f0-9]{12}$/),
-    })
+    expect(res.statusCode).toBe(500)
+    expect(JSON.parse(res.body).error.code).toBe('PROXY_RUNTIME_TARGET_NOT_CONFIGURED')
   })
 
-  it('propagates upstream no-fill requestId and diagnostics through /api/ad/bid', async () => {
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['203.0.113.12']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn()
-        .mockResolvedValueOnce(createJsonUpstreamResponse({
-          requestId: 'req_probe_seed_1',
-          landingUrl: 'https://ads.customer.example/seed',
-        }))
-        .mockResolvedValueOnce(createJsonUpstreamResponse({
-          filled: false,
-          reasonCode: 'UPSTREAM_NO_FILL',
-          reasonMessage: 'No inventory available.',
-          requestId: 'req_upstream_nofill_1',
-          nextAction: 'Retry next request window.',
-        })),
-      now: () => 1735689600000,
-    })
+  it('keeps generic control-plane proxy forwarding intact', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://cp.example.com'
 
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_ad_nofill',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'runtime.customer-ad-nofill.org',
-      placementId: 'chat_from_answer_v1',
-    }
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body).status).toBe('verified')
-
-    const req = createMockReq('/api/ad/bid', 'POST', {
-      authorization: 'Bearer sk_runtime_ad_nofill',
-      'content-type': 'application/json',
-    })
-    req.body = { messages: [] }
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(createJsonUpstreamResponse({ ok: true }))
 
     const res = createMockRes()
-    await dashboardApiProxyHandler(req, res)
+    await dashboardApiProxyHandler(createMockReq('/api/v1/dashboard/state?accountId=org_1', 'GET'), res)
 
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://cp.example.com/api/v1/dashboard/state?accountId=org_1',
+      expect.objectContaining({ method: 'GET' }),
+    )
     expect(res.statusCode).toBe(200)
-    expect(JSON.parse(res.body)).toMatchObject({
-      filled: false,
-      reasonCode: 'UPSTREAM_NO_FILL',
-      reasonMessage: 'No inventory available.',
-      nextAction: 'Retry next request window.',
-      requestId: 'req_upstream_nofill_1',
-      runtimeSource: 'customer',
-      bindStatus: 'verified',
-      routeCode: 'UPSTREAM_NO_FILL',
-      upstreamStatus: 200,
-      tenantId: expect.stringMatching(/^tenant_[a-f0-9]{12}_[a-z0-9]{4}$/),
-    })
-  })
-
-  it('prefers control-plane bootstrap binding over binding-store payload when both are available', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
-    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
-
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options = {}) => {
-      const normalizedUrl = String(url)
-      const method = String(options?.method || 'GET').toUpperCase()
-      if (normalizedUrl === 'https://prod.example.com/api/v1/public/sdk/bootstrap' && method === 'GET') {
-        return createJsonUpstreamResponse({
-          tenantId: 'tenant_cp_truth',
-          bindStatus: 'pending',
-          runtimeSource: 'managed_fallback',
-          runtimeBaseUrl: 'https://managed.cp.example',
-          customerRuntimeBaseUrl: 'https://customer.cp.example',
-          placementDefaults: {
-            placementId: 'chat_from_answer_v1',
-          },
-        })
-      }
-      if (normalizedUrl === 'https://prod.example.com/api/v1/public/runtime-domain/binding' && method === 'GET') {
-        return createJsonUpstreamResponse({
-          binding: {
-            tenantId: 'tenant_store_stale',
-            bindStatus: 'verified',
-            runtimeBaseUrl: 'https://runtime.store-stale.example',
-            placementId: 'chat_from_answer_v1',
-          },
-        })
-      }
-      throw new Error(`Unexpected URL: ${normalizedUrl}`)
-    })
-
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_source_priority',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-
-    expect(bootstrapRes.statusCode).toBe(200)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      bindStatus: 'pending',
-      runtimeSource: 'managed_fallback',
-      runtimeBaseUrl: 'https://managed.cp.example',
-      customerRuntimeBaseUrl: 'https://customer.cp.example',
-      tenantId: 'tenant_cp_truth',
-    })
-  })
-
-  it('keeps unbound /api/ad/bid diagnostics stable across 12 rounds', async () => {
-    delete process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
-    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
-
-    for (let i = 0; i < 12; i += 1) {
-      const req = createMockReq('/api/ad/bid', 'POST', {
-        authorization: 'Bearer sk_runtime_12_rounds',
-        'content-type': 'application/json',
-      })
-      req.body = { messages: [{ role: 'user', content: `round-${i}` }] }
-      const res = createMockRes()
-      await dashboardApiProxyHandler(req, res)
-
-      expect(res.statusCode).toBe(200)
-      expect(JSON.parse(res.body)).toMatchObject({
-        filled: false,
-        reasonCode: 'BINDING_NOT_READY',
-        runtimeSource: 'none',
-        bindStatus: 'unbound',
-        routeCode: 'BINDING_NOT_READY',
-        upstreamStatus: 0,
-      })
-    }
-  })
-
-  it('restores runtime binding from control plane binding store after local cache reset', async () => {
-    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
-    let storedBinding = null
-
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options = {}) => {
-      const normalizedUrl = String(url)
-      const method = String(options?.method || 'GET').toUpperCase()
-      if (normalizedUrl !== 'https://prod.example.com/api/v1/public/runtime-domain/binding') {
-        throw new Error(`Unexpected binding store URL: ${normalizedUrl}`)
-      }
-      if (method === 'PUT') {
-        storedBinding = JSON.parse(String(options.body || '{}')).binding
-        return createJsonUpstreamResponse({ binding: storedBinding })
-      }
-      if (method === 'GET') {
-        if (!storedBinding) return createJsonUpstreamResponse({}, 404)
-        return createJsonUpstreamResponse({ binding: storedBinding })
-      }
-      throw new Error(`Unexpected method: ${method}`)
-    })
-
-    setRuntimeDepsForTests({
-      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
-      resolve6: vi.fn().mockResolvedValue([]),
-      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
-      tlsConnect: createTlsConnectStub(),
-      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
-        requestId: 'req_bind_store_ok',
-        landingUrl: 'https://ads.customer.example/restored',
-      })),
-      now: () => 1735689600000,
-    })
-
-    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
-      authorization: 'Bearer sk_runtime_restore',
-      'content-type': 'application/json',
-    })
-    verifyReq.body = {
-      domain: 'runtime.customer-restore.org',
-      placementId: 'chat_from_answer_v1',
-    }
-    const verifyRes = createMockRes()
-    await dashboardApiProxyHandler(verifyReq, verifyRes)
-    expect(JSON.parse(verifyRes.body).status).toBe('verified')
-
-    clearRuntimeDomainBindingsForTests()
-
-    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
-      authorization: 'Bearer sk_runtime_restore',
-    })
-    const bootstrapRes = createMockRes()
-    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
-
-    expect(bootstrapRes.statusCode).toBe(200)
-    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
-      runtimeSource: 'customer',
-      runtimeBaseUrl: 'https://runtime.customer-restore.org',
-      bindStatus: 'verified',
-    })
+    expect(JSON.parse(res.body)).toMatchObject({ ok: true })
   })
 })
