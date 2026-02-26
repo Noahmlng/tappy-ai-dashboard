@@ -11,9 +11,12 @@ export default defineConfig(({ mode }) => {
     env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
     || 'http://127.0.0.1:3100'
   )
+  const enableVueDevTools = String(env.VITE_ENABLE_VUE_DEVTOOLS || '').trim().toLowerCase() !== 'false'
 
   return {
-    plugins: [vue(), vueJsx(), vueDevTools()],
+    plugins: enableVueDevTools
+      ? [vue(), vueJsx(), vueDevTools()]
+      : [vue(), vueJsx()],
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
