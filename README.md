@@ -59,6 +59,8 @@ npm run build
 - Required:
   - Generate runtime key
   - Call `POST /api/v2/bid`
+- Optional dashboard diagnostic:
+  - Run `/onboarding` Bid Check (uses dashboard proxy, requires `MEDIATION_RUNTIME_API_BASE_URL` configured on dashboard deployment)
 - Not part of current direct integration path:
   - `sdk/bootstrap`
   - runtime bind/probe flow

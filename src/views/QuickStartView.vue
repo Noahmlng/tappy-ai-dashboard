@@ -23,12 +23,14 @@ const appId = computed(() => String(scopeState.appId || authState.user?.appId ||
 const onboardingStatus = computed(() => String(authState.onboarding.status || 'locked').toLowerCase())
 
 const envSnippet = computed(() => (
-  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`
+  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}
+MEDIATION_RUNTIME_API_BASE_URL=https://runtime.example.com/api`
 ))
 
 const integrationSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
+const runtimeApiBaseUrl = process.env.MEDIATION_RUNTIME_API_BASE_URL;
 
-const bidRes = await fetch('/api/v2/bid', {
+const bidRes = await fetch(\`${'${runtimeApiBaseUrl}'}/v2/bid\`, {
   method: 'POST',
   headers: {
     'Authorization': \`Bearer ${'${apiKey}'}\`,
@@ -51,6 +53,9 @@ console.log({ requestId: bidJson.requestId, filled: bidJson.filled, landingUrl: 
 
 const bidEvidence = computed(() => (
   bidResult.value ? JSON.stringify(bidResult.value, null, 2) : ''
+))
+const bidProxyTargetMissing = computed(() => (
+  String(bidResult.value?.error?.code || '').trim() === 'PROXY_RUNTIME_TARGET_NOT_CONFIGURED'
 ))
 
 watch(revealedSecret, (value) => {
@@ -148,6 +153,10 @@ async function handleRunBidCheck() {
     if (!response.ok) {
       const errorCode = String(payload?.error?.code || '').trim()
       const errorMessage = String(payload?.error?.message || '').trim()
+      if (errorCode === 'PROXY_RUNTIME_TARGET_NOT_CONFIGURED') {
+        bidError.value = '[PROXY_RUNTIME_TARGET_NOT_CONFIGURED] Optional dashboard check is unavailable. Set MEDIATION_RUNTIME_API_BASE_URL in this dashboard deployment.'
+        return
+      }
       bidError.value = errorCode ? `[${errorCode}] ${errorMessage}` : (errorMessage || `HTTP ${response.status}`)
       return
     }
@@ -192,7 +201,7 @@ onMounted(async () => {
   <section class="quickstart-grid">
     <article class="panel">
       <h2>Step A · Generate Runtime Key</h2>
-      <p class="muted">Use a runtime key only. No bootstrap, no bind flow.</p>
+      <p class="muted">Use a runtime key only. This is enough to start direct integration.</p>
 
       <div class="meta-row">
         <span class="meta-label">Account</span>
@@ -225,14 +234,17 @@ onMounted(async () => {
     </article>
 
     <article class="panel">
-      <h2>Step B · Run /api/v2/bid</h2>
-      <p class="muted">Success criteria: get <span class="mono">requestId</span>. <span class="mono">No bid</span> with HTTP 200 is still success.</p>
+      <h2>Optional Diagnostic · Run /api/v2/bid</h2>
+      <p class="muted">Not required for integration. This only checks whether this dashboard deployment can proxy runtime requests.</p>
 
       <button class="button button-primary" type="button" :disabled="bidLoading" @click="handleRunBidCheck">
         {{ bidLoading ? 'Running...' : 'Run Bid Check' }}
       </button>
 
       <p v-if="bidError" class="error">{{ bidError }}</p>
+      <p v-if="bidProxyTargetMissing" class="muted">
+        Set <span class="mono">MEDIATION_RUNTIME_API_BASE_URL</span> in Vercel Project Settings for this dashboard.
+      </p>
 
       <div v-if="bidEvidence" class="evidence">
         <div class="toolbar">
