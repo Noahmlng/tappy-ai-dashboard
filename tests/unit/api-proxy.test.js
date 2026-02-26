@@ -851,7 +851,7 @@ describe('dashboardApiProxyHandler', () => {
     )
   })
 
-  it('serves managed_default bootstrap for unbound API key when managed runtime is configured', async () => {
+  it('returns binding-not-ready route error for unbound API key even when managed runtime is configured', async () => {
     process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
     delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
     delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
@@ -862,14 +862,15 @@ describe('dashboardApiProxyHandler', () => {
     const bootstrapRes = createMockRes()
     await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
 
-    expect(bootstrapRes.statusCode).toBe(200)
-    const payload = JSON.parse(bootstrapRes.body)
-    expect(payload).toMatchObject({
-      runtimeSource: 'managed_default',
-      runtimeBaseUrl: 'https://runtime-managed.example.com',
-      bindStatus: 'unbound',
+    expect(bootstrapRes.statusCode).toBe(503)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      error: {
+        code: 'BINDING_NOT_READY',
+        details: {
+          bindStatus: 'unbound',
+        },
+      },
     })
-    expect(String(payload.tenantId || '')).toMatch(/^tenant_[a-f0-9]{12}$/)
   })
 
   it('returns structured route error for unbound API key when managed runtime is unavailable', async () => {
@@ -886,7 +887,7 @@ describe('dashboardApiProxyHandler', () => {
     expect(bootstrapRes.statusCode).toBe(503)
     expect(JSON.parse(bootstrapRes.body)).toMatchObject({
       error: {
-        code: 'MANAGED_RUNTIME_NOT_CONFIGURED',
+        code: 'BINDING_NOT_READY',
         details: {
           bindStatus: 'unbound',
         },
@@ -894,7 +895,7 @@ describe('dashboardApiProxyHandler', () => {
     })
   })
 
-  it('routes /api/v2/bid to managed runtime by default for unbound API key', async () => {
+  it('blocks /api/v2/bid for unbound API key and does not call upstream runtime', async () => {
     process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
     delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
     delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
@@ -919,23 +920,16 @@ describe('dashboardApiProxyHandler', () => {
     const bidRes = createMockRes()
     await dashboardApiProxyHandler(bidReq, bidRes)
 
-    expect(bidRes.statusCode).toBe(200)
-    expect(bidRes.headers['x-tappy-runtime-source']).toBe('managed_default')
+    expect(bidRes.statusCode).toBe(503)
     expect(JSON.parse(bidRes.body)).toMatchObject({
-      requestId: 'req_managed_default_bid',
-      landingUrl: 'https://ads.customer.example/managed-default',
+      error: {
+        code: 'BINDING_NOT_READY',
+        details: {
+          bindStatus: 'unbound',
+        },
+      },
     })
-    expect(runtimeFetch).toHaveBeenCalledWith(
-      'https://runtime-managed.example.com/api/v2/bid',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'x-tappy-tenant-id': expect.stringMatching(/^tenant_[a-f0-9]{12}$/),
-          'x-tappy-bind-status': 'unbound',
-          'x-tappy-runtime-source': 'managed_default',
-        }),
-      }),
-    )
+    expect(runtimeFetch).not.toHaveBeenCalled()
   })
 
   it('returns structured no-fill payload on /api/ad/bid when runtime route is unavailable', async () => {
@@ -955,9 +949,144 @@ describe('dashboardApiProxyHandler', () => {
     expect(res.statusCode).toBe(200)
     expect(JSON.parse(res.body)).toMatchObject({
       filled: false,
-      reasonCode: 'MANAGED_RUNTIME_NOT_CONFIGURED',
+      reasonCode: 'BINDING_NOT_READY',
       runtimeSource: 'none',
+      bindStatus: 'unbound',
+      routeCode: 'BINDING_NOT_READY',
+      upstreamStatus: 0,
+      tenantId: expect.stringMatching(/^tenant_[a-f0-9]{12}$/),
     })
+  })
+
+  it('propagates upstream no-fill requestId and diagnostics through /api/ad/bid', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['203.0.113.12']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn()
+        .mockResolvedValueOnce(createJsonUpstreamResponse({
+          requestId: 'req_probe_seed_1',
+          landingUrl: 'https://ads.customer.example/seed',
+        }))
+        .mockResolvedValueOnce(createJsonUpstreamResponse({
+          filled: false,
+          reasonCode: 'UPSTREAM_NO_FILL',
+          reasonMessage: 'No inventory available.',
+          requestId: 'req_upstream_nofill_1',
+          nextAction: 'Retry next request window.',
+        })),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_ad_nofill',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'runtime.customer-ad-nofill.org',
+      placementId: 'chat_from_answer_v1',
+    }
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body).status).toBe('verified')
+
+    const req = createMockReq('/api/ad/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_ad_nofill',
+      'content-type': 'application/json',
+    })
+    req.body = { messages: [] }
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toMatchObject({
+      filled: false,
+      reasonCode: 'UPSTREAM_NO_FILL',
+      reasonMessage: 'No inventory available.',
+      nextAction: 'Retry next request window.',
+      requestId: 'req_upstream_nofill_1',
+      runtimeSource: 'customer',
+      bindStatus: 'verified',
+      routeCode: 'UPSTREAM_NO_FILL',
+      upstreamStatus: 200,
+      tenantId: expect.stringMatching(/^tenant_[a-f0-9]{12}_[a-z0-9]{4}$/),
+    })
+  })
+
+  it('prefers control-plane bootstrap binding over binding-store payload when both are available', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
+    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options = {}) => {
+      const normalizedUrl = String(url)
+      const method = String(options?.method || 'GET').toUpperCase()
+      if (normalizedUrl === 'https://prod.example.com/api/v1/public/sdk/bootstrap' && method === 'GET') {
+        return createJsonUpstreamResponse({
+          tenantId: 'tenant_cp_truth',
+          bindStatus: 'pending',
+          runtimeSource: 'managed_fallback',
+          runtimeBaseUrl: 'https://managed.cp.example',
+          customerRuntimeBaseUrl: 'https://customer.cp.example',
+          placementDefaults: {
+            placementId: 'chat_from_answer_v1',
+          },
+        })
+      }
+      if (normalizedUrl === 'https://prod.example.com/api/v1/public/runtime-domain/binding' && method === 'GET') {
+        return createJsonUpstreamResponse({
+          binding: {
+            tenantId: 'tenant_store_stale',
+            bindStatus: 'verified',
+            runtimeBaseUrl: 'https://runtime.store-stale.example',
+            placementId: 'chat_from_answer_v1',
+          },
+        })
+      }
+      throw new Error(`Unexpected URL: ${normalizedUrl}`)
+    })
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_source_priority',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+
+    expect(bootstrapRes.statusCode).toBe(200)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      bindStatus: 'pending',
+      runtimeSource: 'managed_fallback',
+      runtimeBaseUrl: 'https://managed.cp.example',
+      customerRuntimeBaseUrl: 'https://customer.cp.example',
+      tenantId: 'tenant_cp_truth',
+    })
+  })
+
+  it('keeps unbound /api/ad/bid diagnostics stable across 12 rounds', async () => {
+    delete process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+
+    for (let i = 0; i < 12; i += 1) {
+      const req = createMockReq('/api/ad/bid', 'POST', {
+        authorization: 'Bearer sk_runtime_12_rounds',
+        'content-type': 'application/json',
+      })
+      req.body = { messages: [{ role: 'user', content: `round-${i}` }] }
+      const res = createMockRes()
+      await dashboardApiProxyHandler(req, res)
+
+      expect(res.statusCode).toBe(200)
+      expect(JSON.parse(res.body)).toMatchObject({
+        filled: false,
+        reasonCode: 'BINDING_NOT_READY',
+        runtimeSource: 'none',
+        bindStatus: 'unbound',
+        routeCode: 'BINDING_NOT_READY',
+        upstreamStatus: 0,
+      })
+    }
   })
 
   it('restores runtime binding from control plane binding store after local cache reset', async () => {

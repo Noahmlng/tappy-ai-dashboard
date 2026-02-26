@@ -642,6 +642,9 @@ function makeBindingSnapshot(existing = {}, patch = {}) {
     keyHash,
     tenantId: cleanText(patch.tenantId || existing.tenantId),
     runtimeBaseUrl: cleanText(patch.runtimeBaseUrl || existing.runtimeBaseUrl),
+    managedRuntimeBaseUrl: cleanText(patch.managedRuntimeBaseUrl || existing.managedRuntimeBaseUrl),
+    customerRuntimeBaseUrl: cleanText(patch.customerRuntimeBaseUrl || existing.customerRuntimeBaseUrl),
+    runtimeSourceHint: cleanText(patch.runtimeSourceHint || existing.runtimeSourceHint),
     placementId: cleanText(patch.placementId || existing.placementId || DEFAULT_PLACEMENT_ID),
     keyScope: 'tenant',
     bindStatus: normalizeBindStatus(patch.bindStatus || existing.bindStatus || DEFAULT_BIND_STATUS),
@@ -725,6 +728,34 @@ function buildRuntimeBindingStoreUrl(upstreamBaseUrl = '') {
   }
 }
 
+function buildControlPlaneBootstrapUrl(upstreamBaseUrl = '') {
+  const normalized = cleanText(upstreamBaseUrl)
+  if (!normalized) return ''
+  try {
+    const target = new URL(normalized)
+    const basePath = target.pathname.replace(/\/$/, '')
+    target.pathname = basePath.endsWith('/api')
+      ? `${basePath}/v1/public/sdk/bootstrap`
+      : `${basePath}/api/v1/public/sdk/bootstrap`
+    target.search = ''
+    target.hash = ''
+    return target.toString()
+  } catch {
+    return ''
+  }
+}
+
+function logRuntimeBindingWarning(event, input = {}) {
+  const payload = {
+    source: cleanText(input.source),
+    status: Number(input.status || 0) || undefined,
+    requestId: cleanText(input.requestId),
+    code: cleanText(input.code),
+    message: cleanText(input.message),
+  }
+  console.warn(`[runtime-binding][${cleanText(event) || 'warn'}]`, payload)
+}
+
 function normalizeRuntimeBindingStorePayload(payload = {}) {
   const source = payload && typeof payload === 'object' && !Array.isArray(payload)
     ? payload
@@ -741,6 +772,121 @@ function normalizeRuntimeBindingStorePayload(payload = {}) {
   )
   if (!hasUsefulFields) return null
   return makeBindingSnapshot({}, candidate)
+}
+
+function normalizeControlPlaneBootstrapBindingPayload(payload = {}, authorization = '') {
+  const source = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload
+    : {}
+  const error = source.error && typeof source.error === 'object' && !Array.isArray(source.error)
+    ? source.error
+    : {}
+  const details = error.details && typeof error.details === 'object' && !Array.isArray(error.details)
+    ? error.details
+    : {}
+  const bindStatusInput = pickFirstText(
+    source.bindStatus,
+    details.bindStatus,
+    source.status === 'verified' ? 'verified' : '',
+  )
+  const bindStatus = bindStatusInput
+    ? normalizeBindStatus(bindStatusInput)
+    : ''
+  const runtimeSourceHint = cleanText(
+    source.runtimeSource
+    || source.runtimeSourceHint,
+  ).toLowerCase()
+  const routeRuntimeBaseUrl = cleanText(source.runtimeBaseUrl)
+  const customerRuntimeBaseUrl = runtimeSourceHint.startsWith('managed')
+    ? cleanText(source.customerRuntimeBaseUrl)
+    : pickFirstText(source.customerRuntimeBaseUrl, routeRuntimeBaseUrl)
+  const managedRuntimeBaseUrl = runtimeSourceHint.startsWith('managed')
+    ? routeRuntimeBaseUrl
+    : cleanText(source.managedRuntimeBaseUrl)
+  const tenantId = pickFirstText(
+    source.tenantId,
+    details.tenantId,
+    makeStableTenantId(authorization),
+  )
+  const placementId = pickFirstText(
+    source?.placementDefaults?.placementId,
+    source.placementId,
+    DEFAULT_PLACEMENT_ID,
+  )
+  const hasUsefulFields = Boolean(
+    bindStatus
+    || runtimeSourceHint
+    || routeRuntimeBaseUrl
+    || managedRuntimeBaseUrl
+    || customerRuntimeBaseUrl
+    || tenantId,
+  )
+  if (!hasUsefulFields) return null
+  return makeBindingSnapshot({}, {
+    tenantId,
+    placementId,
+    bindStatus: bindStatus || UNBOUND_BIND_STATUS,
+    runtimeSourceHint,
+    runtimeBaseUrl: runtimeSourceHint.startsWith('managed')
+      ? customerRuntimeBaseUrl
+      : routeRuntimeBaseUrl,
+    customerRuntimeBaseUrl,
+    managedRuntimeBaseUrl,
+    lastProbeCode: cleanText(source.lastProbeCode),
+  })
+}
+
+async function readBindingFromControlPlaneBootstrap(authorization = '') {
+  const normalizedAuthorization = normalizeAuthorization(authorization)
+  const upstreamBaseUrl = resolveUpstreamBaseUrl()
+  const targetUrl = buildControlPlaneBootstrapUrl(upstreamBaseUrl)
+  if (!normalizedAuthorization || !targetUrl) return { ok: false, binding: null }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort('Control plane bootstrap read timeout')
+  }, RUNTIME_BINDING_STORE_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: 'GET',
+      headers: {
+        authorization: normalizedAuthorization,
+        accept: 'application/json',
+      },
+      signal: controller.signal,
+    })
+
+    const payload = await readJsonResponse(response)
+    const binding = normalizeControlPlaneBootstrapBindingPayload(payload || {}, normalizedAuthorization)
+    if (response.ok) {
+      if (binding) return { ok: true, binding }
+      logRuntimeBindingWarning('control-plane-bootstrap-invalid', {
+        source: 'control_plane_bootstrap',
+        status: response.status,
+        message: 'Control plane bootstrap response does not include binding fields.',
+      })
+      return { ok: false, binding: null }
+    }
+    if (binding) return { ok: true, binding }
+    logRuntimeBindingWarning('control-plane-bootstrap-failed', {
+      source: 'control_plane_bootstrap',
+      status: response.status,
+      requestId: cleanText(payload?.requestId || payload?.error?.requestId),
+      code: cleanText(payload?.error?.code),
+      message: cleanText(payload?.error?.message || 'Control plane bootstrap request failed.'),
+    })
+    return { ok: false, binding: null }
+  } catch (error) {
+    logRuntimeBindingWarning('control-plane-bootstrap-failed', {
+      source: 'control_plane_bootstrap',
+      code: 'FETCH_FAILED',
+      message: error instanceof Error ? error.message : 'Control plane bootstrap request failed.',
+    })
+    return { ok: false, binding: null }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function readRuntimeBindingFromStore(authorization = '') {
@@ -765,12 +911,31 @@ async function readRuntimeBindingFromStore(authorization = '') {
     })
 
     if (response.status === 404) return { ok: true, binding: null }
-    if (!response.ok) return { ok: false, binding: null }
+    if (!response.ok) {
+      logRuntimeBindingWarning('store-read-failed', {
+        source: 'binding_store',
+        status: response.status,
+        message: 'Runtime binding store read failed.',
+      })
+      return { ok: false, binding: null }
+    }
 
     const payload = await readJsonResponse(response)
     const binding = normalizeRuntimeBindingStorePayload(payload || {})
+    if (!binding && payload) {
+      logRuntimeBindingWarning('store-read-invalid', {
+        source: 'binding_store',
+        status: response.status,
+        message: 'Runtime binding store response does not include binding fields.',
+      })
+    }
     return { ok: true, binding }
-  } catch {
+  } catch (error) {
+    logRuntimeBindingWarning('store-read-failed', {
+      source: 'binding_store',
+      code: 'FETCH_FAILED',
+      message: error instanceof Error ? error.message : 'Runtime binding store read failed.',
+    })
     return { ok: false, binding: null }
   } finally {
     clearTimeout(timer)
@@ -809,11 +974,30 @@ async function writeRuntimeBindingToStore(authorization = '', binding = null) {
       signal: controller.signal,
     })
 
-    if (!response.ok) return { ok: false, binding: snapshot }
+    if (!response.ok) {
+      logRuntimeBindingWarning('store-write-failed', {
+        source: 'binding_store',
+        status: response.status,
+        message: 'Runtime binding store write failed.',
+      })
+      return { ok: false, binding: snapshot }
+    }
     const payload = await readJsonResponse(response)
     const normalized = normalizeRuntimeBindingStorePayload(payload || {})
+    if (!normalized) {
+      logRuntimeBindingWarning('store-write-invalid', {
+        source: 'binding_store',
+        status: response.status,
+        message: 'Runtime binding store write response does not include binding fields.',
+      })
+    }
     return { ok: true, binding: normalized || snapshot }
-  } catch {
+  } catch (error) {
+    logRuntimeBindingWarning('store-write-failed', {
+      source: 'binding_store',
+      code: 'FETCH_FAILED',
+      message: error instanceof Error ? error.message : 'Runtime binding store write failed.',
+    })
     return { ok: false, binding: snapshot }
   } finally {
     clearTimeout(timer)
@@ -825,10 +1009,23 @@ async function getRuntimeBindingByAuthorization(authorization = '', options = {}
   if (!normalizedAuthorization) return null
 
   const cached = readRuntimeBindingCache(normalizedAuthorization)
-  if (cached !== undefined) return cached || null
+  if (cached !== undefined && options?.ignoreCache !== true) return cached || null
 
   const localBinding = runtimeDomainBindings.get(normalizedAuthorization) || null
+  const preferControlPlaneBootstrap = options?.preferControlPlaneBootstrap !== false
   const preferStore = options?.preferStore !== false
+
+  if (preferControlPlaneBootstrap) {
+    const controlPlaneResult = await readBindingFromControlPlaneBootstrap(normalizedAuthorization)
+    if (controlPlaneResult.ok) {
+      const binding = controlPlaneResult.binding || null
+      if (binding) {
+        runtimeDomainBindings.set(normalizedAuthorization, binding)
+      }
+      writeRuntimeBindingCache(normalizedAuthorization, binding)
+      return binding
+    }
+  }
 
   if (!preferStore) {
     writeRuntimeBindingCache(normalizedAuthorization, localBinding)
@@ -972,12 +1169,12 @@ function buildRuntimeRouteFailureDetails(binding = {}) {
     bindStatus,
     nextActions: bindStatus === UNBOUND_BIND_STATUS
       ? [
-        'Ensure MEDIATION_CONTROL_PLANE_API_BASE_URL is configured (managed route is auto-derived by default).',
-        'Optionally set MEDIATION_MANAGED_RUNTIME_BASE_URL to override managed runtime origin.',
-        'Or bind a custom runtime domain via /api/v1/public/runtime-domain/verify-and-bind.',
+        'Bind a runtime domain via /api/v1/public/runtime-domain/verify-and-bind.',
+        'Ensure binding is synced on Mediation control plane for this API key.',
+        'Retry sdk/bootstrap after bindStatus is pending or verified.',
       ]
       : [
-        'Ensure MEDIATION_CONTROL_PLANE_API_BASE_URL is configured so managed fallback route is available.',
+        'Ensure MEDIATION_CONTROL_PLANE_API_BASE_URL is configured so control-plane bootstrap can be read.',
         'Optionally set MEDIATION_MANAGED_RUNTIME_BASE_URL to override managed runtime origin.',
         'Run runtime-domain probe and fix the reported probe error.',
       ],
@@ -996,10 +1193,19 @@ function resolveRuntimeRoute(binding = null, options = {}) {
       bindStatus: UNBOUND_BIND_STATUS,
     })
   const bindStatus = normalizeBindStatus(resolvedBinding?.bindStatus || UNBOUND_BIND_STATUS)
-  const customerRuntimeBaseUrl = cleanText(resolvedBinding?.runtimeBaseUrl)
+  const customerRuntimeBaseUrl = pickFirstText(
+    resolvedBinding?.customerRuntimeBaseUrl,
+    resolvedBinding?.runtimeBaseUrl,
+  )
+  const managedRuntimeFromBinding = pickFirstText(
+    resolvedBinding?.managedRuntimeBaseUrl,
+    cleanText(resolvedBinding?.runtimeSourceHint).startsWith('managed')
+      ? cleanText(resolvedBinding?.runtimeBaseUrl)
+      : '',
+  )
   const managedFallbackEnabled = shouldEnableManagedRuntimeFallback()
   const managedRuntimeBaseUrl = managedFallbackEnabled
-    ? resolveManagedRuntimeBaseUrl()
+    ? pickFirstText(managedRuntimeFromBinding, resolveManagedRuntimeBaseUrl())
     : ''
 
   if (bindStatus === 'verified' && customerRuntimeBaseUrl) {
@@ -1010,6 +1216,19 @@ function resolveRuntimeRoute(binding = null, options = {}) {
       customerRuntimeBaseUrl,
       bindStatus: 'verified',
       tenantId: cleanText(resolvedBinding?.tenantId),
+      binding: resolvedBinding,
+    }
+  }
+
+  if (bindStatus === UNBOUND_BIND_STATUS) {
+    const failureDetails = buildRuntimeRouteFailureDetails(resolvedBinding)
+    return {
+      ok: false,
+      code: 'BINDING_NOT_READY',
+      message: 'Runtime binding is not ready for this API key.',
+      bindStatus: failureDetails.bindStatus,
+      tenantId: cleanText(resolvedBinding?.tenantId),
+      nextActions: failureDetails.nextActions,
       binding: resolvedBinding,
     }
   }
@@ -1033,18 +1252,6 @@ function resolveRuntimeRoute(binding = null, options = {}) {
       message: 'Managed runtime fallback is not configured for this API key.',
       bindStatus: failureDetails.bindStatus,
       nextActions: failureDetails.nextActions,
-      binding: resolvedBinding,
-    }
-  }
-
-  if (managedRuntimeBaseUrl) {
-    return {
-      ok: true,
-      runtimeSource: 'managed_default',
-      runtimeBaseUrl: managedRuntimeBaseUrl,
-      customerRuntimeBaseUrl: '',
-      bindStatus: UNBOUND_BIND_STATUS,
-      tenantId: cleanText(resolvedBinding?.tenantId),
       binding: resolvedBinding,
     }
   }
@@ -1508,7 +1715,9 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
     checks.tlsOk = tlsChecks.tlsOk
     checks.connectOk = tlsChecks.connectOk
 
-    const existingBinding = await getRuntimeBindingByAuthorization(authorization) || {}
+    const existingBinding = await getRuntimeBindingByAuthorization(authorization, {
+      preferControlPlaneBootstrap: false,
+    }) || {}
     const pendingBinding = makeBindingSnapshot(existingBinding, {
       tenantId: existingBinding.tenantId || tenantId,
       runtimeBaseUrl,
@@ -1618,7 +1827,9 @@ async function handleRuntimeDomainProbe(req, res) {
     return
   }
 
-  const binding = await getRuntimeBindingByAuthorization(authorization) || {}
+  const binding = await getRuntimeBindingByAuthorization(authorization, {
+    preferControlPlaneBootstrap: false,
+  }) || {}
   const normalizedDomain = cleanText(payload?.domain)
     ? normalizeRuntimeDomain(payload?.domain)
     : null
@@ -1740,6 +1951,7 @@ function buildRuntimeRouteError(route = {}, requestId = '') {
       requestId: cleanText(requestId),
       details: {
         bindStatus: normalizeBindStatus(route.bindStatus || UNBOUND_BIND_STATUS),
+        tenantId: cleanText(route.tenantId),
         nextActions: Array.isArray(route.nextActions) ? route.nextActions : [],
       },
     },
@@ -1759,8 +1971,13 @@ function buildNoFillResponse(input = {}) {
     reasonCode: cleanText(input.reasonCode || 'NO_FILL'),
     reasonMessage: cleanText(input.reasonMessage || 'Ad request returned no fill.'),
     nextAction: cleanText(input.nextAction),
+    requestId: cleanText(input.requestId),
     traceId: cleanText(input.traceId),
     runtimeSource: cleanText(input.runtimeSource || 'unknown'),
+    bindStatus: cleanText(input.bindStatus),
+    tenantId: cleanText(input.tenantId),
+    routeCode: cleanText(input.routeCode),
+    upstreamStatus: Number(input.upstreamStatus || 0) || 0,
   }
 }
 
@@ -1802,6 +2019,7 @@ async function requestRuntimeBid(input = {}) {
         status: 502,
         errorCode: 'BID_INVALID_RESPONSE',
         errorMessage: 'Runtime bid response is not valid JSON.',
+        upstreamStatus: status,
       }
     }
 
@@ -1812,6 +2030,12 @@ async function requestRuntimeBid(input = {}) {
         errorCode: cleanText(jsonPayload.reasonCode || 'UPSTREAM_NO_FILL'),
         errorMessage: cleanText(jsonPayload.reasonMessage || 'Runtime bid response returned filled=false.'),
         nextAction: cleanText(jsonPayload.nextAction),
+        upstreamRequestId: cleanText(
+          jsonPayload.requestId
+          || jsonPayload.traceId
+          || jsonPayload.bid?.requestId,
+        ),
+        upstreamStatus: status,
         upstreamPayload: jsonPayload,
       }
     }
@@ -1823,6 +2047,12 @@ async function requestRuntimeBid(input = {}) {
         status: 502,
         errorCode: 'BID_INVALID_RESPONSE',
         errorMessage: 'Runtime bid response does not include landingUrl.',
+        upstreamRequestId: cleanText(
+          jsonPayload.requestId
+          || jsonPayload.traceId
+          || jsonPayload.bid?.requestId,
+        ),
+        upstreamStatus: status,
         upstreamPayload: jsonPayload,
       }
     }
@@ -1843,6 +2073,7 @@ async function requestRuntimeBid(input = {}) {
       errorMessage: usingManagedRuntime
         ? 'Failed to reach managed runtime /api/v2/bid.'
         : 'Failed to reach runtime domain /api/v2/bid.',
+      upstreamStatus: 0,
     }
   }
 }
@@ -1968,6 +2199,7 @@ async function handleAdBid(req, res) {
   const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
   if (!authorization) {
     sendJson(res, 200, buildNoFillResponse({
+      requestId: traceId,
       traceId,
       reasonCode: 'AUTH_FORBIDDEN',
       reasonMessage: 'Authorization header is required.',
@@ -1983,11 +2215,16 @@ async function handleAdBid(req, res) {
   })
   if (!route.ok) {
     const noFill = buildNoFillResponse({
+      requestId: traceId,
       traceId,
       reasonCode: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
       reasonMessage: cleanText(route.message || 'No runtime route available for this API key.'),
       nextAction: pickNoFillAction(route),
       runtimeSource: 'none',
+      bindStatus: route.bindStatus,
+      tenantId: route.tenantId,
+      routeCode: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
+      upstreamStatus: 0,
     })
     console.warn('[ad-bid][no-fill]', noFill)
     sendJson(res, 200, noFill)
@@ -2012,6 +2249,7 @@ async function handleAdBid(req, res) {
 
   if (!bidResult.ok || bidResult.passthrough) {
     const noFill = buildNoFillResponse({
+      requestId: cleanText(bidResult.upstreamRequestId || traceId),
       traceId,
       reasonCode: cleanText(bidResult.errorCode || 'BID_INVALID_RESPONSE'),
       reasonMessage: cleanText(bidResult.errorMessage || 'Runtime bid response is not valid JSON.'),
@@ -2020,6 +2258,10 @@ async function handleAdBid(req, res) {
         || pickNoFillAction(route, 'Retry later or verify runtime route health in dashboard diagnostics.'),
       ),
       runtimeSource: route.runtimeSource,
+      bindStatus: route.bindStatus,
+      tenantId: route.tenantId,
+      routeCode: cleanText(bidResult.errorCode || ''),
+      upstreamStatus: Number(bidResult.upstreamStatus || bidResult.status || 0),
     })
     console.warn('[ad-bid][no-fill]', noFill)
     sendJson(res, 200, noFill)
