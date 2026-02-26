@@ -50,6 +50,8 @@ describe('api proxy helpers', () => {
       .toBe('https://control-plane.example.com/api')
     expect(normalizeUpstreamBaseUrl('https://control-plane.example.com/api'))
       .toBe('https://control-plane.example.com/api')
+    expect(normalizeUpstreamBaseUrl('https://control-plane.example.com/api\\n'))
+      .toBe('https://control-plane.example.com/api')
   })
 
   it('builds upstream url by removing local /api prefix', () => {

@@ -25,7 +25,10 @@ const BROWSER_ONLY_REQUEST_HEADERS = new Set([
 const UPSTREAM_TIMEOUT_MS = 10_000
 
 export function normalizeUpstreamBaseUrl(rawValue) {
-  const value = String(rawValue || '').trim()
+  const value = String(rawValue || '')
+    .replace(/\\[nr]/g, '')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .trim()
   if (!value) return ''
 
   try {
