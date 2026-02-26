@@ -304,13 +304,12 @@ test.describe('dashboard smoke flow', () => {
     await expect(page.getByRole('heading', { name: 'Onboarding', exact: true })).toBeVisible()
 
     await expect(page.locator('aside .nav-link[href="/onboarding"]')).toHaveCount(1)
-    await expect(page.locator('aside .nav-link[href="/config"]')).toHaveCount(1)
+    await expect(page.locator('aside .nav-link[href="/config"]')).toHaveCount(0)
+    await expect(page.locator('aside .nav-link[href="/api-keys"]')).toHaveCount(0)
     await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(0)
 
     await page.goto('/config')
-    await expect(page).toHaveURL(/\/config$/)
-    await expect(page.getByRole('heading', { name: 'Placement', exact: true })).toBeVisible()
-    await expect(page.getByLabel('Ad Type').first()).toBeVisible()
+    await expect(page).toHaveURL(/\/onboarding$/)
 
     await page.goto('/usage')
     await expect(page).toHaveURL(/\/onboarding$/)

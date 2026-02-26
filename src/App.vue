@@ -15,8 +15,6 @@ const navItems = computed(() => {
   if (!isOnboardingVerified()) {
     return [
       { to: '/onboarding', label: 'Onboarding', icon: 'flash' },
-      { to: '/api-keys', label: 'Key', icon: 'key' },
-      { to: '/config', label: 'Placement', icon: 'sliders' },
     ]
   }
   return [

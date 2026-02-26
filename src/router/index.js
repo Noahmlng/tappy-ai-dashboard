@@ -80,8 +80,6 @@ const router = createRouter({
 
 const PRE_VERIFY_ALLOWED_ROUTES = new Set([
   'onboarding',
-  'apiKeys',
-  'config',
 ])
 
 router.beforeEach(async (to) => {
