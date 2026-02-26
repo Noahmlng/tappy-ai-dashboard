@@ -8,6 +8,7 @@ import dashboardApiProxyHandler, {
   normalizeUpstreamBaseUrl,
   normalizeBidPayload,
   normalizeRuntimeDomain,
+  resolveManagedRuntimeBaseUrl,
   resolveUpstreamBaseUrl,
   setRuntimeDepsForTests,
 } from '../../api/[...path].js'
@@ -104,6 +105,17 @@ describe('api proxy helpers', () => {
       MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com',
       MEDIATION_CONTROL_PLANE_API_PROXY_TARGET: 'http://127.0.0.1:3100',
     })).toBe('https://prod.example.com/api')
+  })
+
+  it('derives managed runtime base url from upstream api base when explicit override is absent', () => {
+    expect(resolveManagedRuntimeBaseUrl({
+      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
+    })).toBe('https://prod.example.com')
+
+    expect(resolveManagedRuntimeBaseUrl({
+      MEDIATION_MANAGED_RUNTIME_BASE_URL: 'https://runtime-managed.example.com/base',
+      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
+    })).toBe('https://runtime-managed.example.com/base')
   })
 
   it('strips browser-only cors headers and keeps server-relevant headers', () => {
@@ -206,6 +218,7 @@ describe('dashboardApiProxyHandler', () => {
         entries() {
           return new Map([
             ['content-type', 'application/json; charset=utf-8'],
+            ['content-encoding', 'gzip'],
             ['set-cookie', 'dash_session=s1; Path=/'],
           ]).entries()
         },
@@ -226,6 +239,7 @@ describe('dashboardApiProxyHandler', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.headers['set-cookie']).toEqual(['dash_session=s1; Path=/', 'dash_csrf=c1; Path=/'])
+    expect(res.headers['content-encoding']).toBeUndefined()
     expect(res.body).toBe(payload)
     expect(requestOptions.headers.origin).toBeUndefined()
     expect(requestOptions.headers.referer).toBeUndefined()
@@ -507,6 +521,49 @@ describe('dashboardApiProxyHandler', () => {
     })
   })
 
+  it('returns managed runtime base from bootstrap when binding is pending and fallback is enabled', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
+
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue([]),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockRejectedValue(new Error('socket hang up')),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_pending_bootstrap',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'simple-chatbot-phi.vercel.app',
+      placementId: 'chat_from_answer_v1',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body)).toMatchObject({
+      status: 'pending',
+      failureCode: 'EGRESS_BLOCKED',
+    })
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_pending_bootstrap',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+
+    expect(bootstrapRes.statusCode).toBe(200)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      runtimeSource: 'managed_fallback',
+      runtimeBaseUrl: 'https://prod.example.com',
+      customerRuntimeBaseUrl: 'https://simple-chatbot-phi.vercel.app',
+      bindStatus: 'pending',
+    })
+  })
+
   it('supports runtime-domain probe and classifies server fail + browser pass as egress blocked', async () => {
     setRuntimeDepsForTests({
       resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
@@ -722,5 +779,73 @@ describe('dashboardApiProxyHandler', () => {
     const payload = JSON.parse(bidRes.body)
     expect(payload.landingUrl).toBe('https://ads.customer.example/deal')
     expect(payload.ad.landingUrl).toBe('https://ads.customer.example/deal')
+  })
+
+  it('routes /api/v2/bid to managed fallback endpoint when bound domain is pending with endpoint mismatch', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
+
+    const fetchMock = vi.fn(async (url) => {
+      const normalized = String(url)
+      if (normalized === 'https://simple-chatbot-phi.vercel.app/api/v2/bid') {
+        return createJsonUpstreamResponse({
+          error: {
+            code: 'NOT_FOUND',
+          },
+        }, 404)
+      }
+      if (normalized === 'https://prod.example.com/api/v2/bid') {
+        return createJsonUpstreamResponse({
+          requestId: 'req_managed_1',
+          landingUrl: 'https://ads.customer.example/managed',
+        })
+      }
+      throw new Error(`Unexpected runtime URL: ${normalized}`)
+    })
+
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue([]),
+      tlsConnect: createTlsConnectStub(),
+      fetch: fetchMock,
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_pending_bid',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'simple-chatbot-phi.vercel.app',
+      placementId: 'chat_from_answer_v1',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body)).toMatchObject({
+      status: 'pending',
+      failureCode: 'ENDPOINT_404',
+    })
+
+    const bidReq = createMockReq('/api/v2/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_pending_bid',
+      'content-type': 'application/json',
+    })
+    bidReq.body = { placementId: 'chat_from_answer_v1', messages: [] }
+
+    const bidRes = createMockRes()
+    await dashboardApiProxyHandler(bidReq, bidRes)
+
+    expect(bidRes.statusCode).toBe(200)
+    expect(JSON.parse(bidRes.body)).toMatchObject({
+      requestId: 'req_managed_1',
+      landingUrl: 'https://ads.customer.example/managed',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://prod.example.com/api/v2/bid',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
   })
 })

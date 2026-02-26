@@ -15,6 +15,10 @@ const HOP_BY_HOP_HEADERS = new Set([
   'host',
   'content-length',
 ])
+const RESPONSE_HEADERS_TO_STRIP = new Set([
+  ...HOP_BY_HOP_HEADERS,
+  'content-encoding',
+])
 
 const BROWSER_ONLY_REQUEST_HEADERS = new Set([
   'origin',
@@ -37,6 +41,13 @@ const URL_IN_TEXT_RE = /(https?:\/\/[^\s"'<>]+)/i
 const PROBE_HEADERS_MAX_KEYS = 2
 const PROBE_HEADERS_MAX_BYTES = 2_048
 const DEFAULT_BIND_STATUS = 'pending'
+const MANAGED_FALLBACK_PROBE_CODES = new Set([
+  'EGRESS_BLOCKED',
+  'ENDPOINT_404',
+  'METHOD_405',
+  'UPSTREAM_5XX',
+  'CORS_BLOCKED',
+])
 
 const runtimeDomainBindings = new Map()
 let runtimeDepsOverride = null
@@ -142,6 +153,7 @@ function makeLegacyProbeCode(code = '') {
     'EGRESS_BLOCKED',
     'ENDPOINT_404',
     'METHOD_405',
+    'CORS_BLOCKED',
     'UPSTREAM_5XX',
   ].includes(normalized)) {
     return 'NETWORK_BLOCKED'
@@ -186,6 +198,11 @@ function buildNextActions(code = '') {
       return [
         'Run Browser Probe to verify user-side reachability.',
         'If Browser Probe passes, allow-list control-plane egress IPs or relax edge protection.',
+      ]
+    case 'CORS_BLOCKED':
+      return [
+        'Allow dashboard origin in Access-Control-Allow-Origin for browser probe requests.',
+        'Or skip browser probe and rely on server probe diagnostics for production runtime checks.',
       ]
     case 'PROBE_HEADERS_INVALID':
       return [
@@ -693,6 +710,67 @@ export function resolveUpstreamBaseUrl(env = process.env) {
   return ''
 }
 
+function normalizePublicBaseUrl(rawValue) {
+  const input = cleanText(rawValue)
+  if (!input) return ''
+  try {
+    const parsed = new URL(input)
+    if (!['http:', 'https:'].includes(parsed.protocol)) return ''
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+export function resolveManagedRuntimeBaseUrl(env = process.env) {
+  const explicit = normalizePublicBaseUrl(env.MEDIATION_MANAGED_RUNTIME_BASE_URL)
+  if (explicit) return explicit
+
+  const upstreamBaseUrl = resolveUpstreamBaseUrl(env)
+  if (!upstreamBaseUrl) return ''
+
+  try {
+    const parsed = new URL(upstreamBaseUrl)
+    const pathname = parsed.pathname.replace(/\/$/, '')
+    parsed.pathname = pathname.endsWith('/api')
+      ? (pathname.slice(0, -4) || '/')
+      : (pathname || '/')
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function shouldEnableManagedRuntimeFallback(env = process.env) {
+  return cleanText(env?.MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK) !== '0'
+}
+
+function shouldUseManagedRuntimeFallback(binding = {}) {
+  const bindStatus = cleanText(binding?.bindStatus || DEFAULT_BIND_STATUS).toLowerCase()
+  if (bindStatus === 'verified') return false
+  const probeCode = cleanText(binding?.lastProbeCode).toUpperCase()
+  return MANAGED_FALLBACK_PROBE_CODES.has(probeCode)
+}
+
+function buildManagedBidTargetUrl(upstreamBaseUrl) {
+  const normalizedUpstreamBaseUrl = cleanText(upstreamBaseUrl)
+  if (!normalizedUpstreamBaseUrl) return ''
+  try {
+    const target = new URL(normalizedUpstreamBaseUrl)
+    const basePath = target.pathname.replace(/\/$/, '')
+    target.pathname = `${basePath}/v2/bid`
+    target.search = ''
+    target.hash = ''
+    return target.toString()
+  } catch {
+    return ''
+  }
+}
+
 export function buildUpstreamUrl(req, upstreamBaseUrl) {
   const requestUrl = new URL(req.url || '/api', 'http://localhost')
   const base = new URL(upstreamBaseUrl)
@@ -968,7 +1046,7 @@ function setUpstreamResponseHeaders(res, upstreamResponse) {
   for (const [key, value] of upstreamResponse.headers.entries()) {
     const normalizedKey = String(key || '').toLowerCase()
     if (normalizedKey === 'set-cookie') continue
-    if (HOP_BY_HOP_HEADERS.has(normalizedKey)) continue
+    if (RESPONSE_HEADERS_TO_STRIP.has(normalizedKey)) continue
     res.setHeader(key, value)
   }
 }
@@ -1388,8 +1466,23 @@ function handleSdkBootstrap(req, res) {
     return
   }
 
+  let runtimeBaseUrl = cleanText(binding.runtimeBaseUrl)
+  let runtimeSource = 'customer'
+  const customerRuntimeBaseUrl = runtimeBaseUrl
+
+  if (shouldEnableManagedRuntimeFallback() && shouldUseManagedRuntimeFallback(binding)) {
+    const managedRuntimeBaseUrl = resolveManagedRuntimeBaseUrl()
+    if (managedRuntimeBaseUrl) {
+      runtimeBaseUrl = managedRuntimeBaseUrl
+      runtimeSource = 'managed_fallback'
+    }
+  }
+
   sendJson(res, 200, {
     ...projectBindingForResponse(binding),
+    runtimeBaseUrl,
+    runtimeSource,
+    customerRuntimeBaseUrl,
     lastProbeCode: cleanText(binding.lastProbeCode),
     bindStatus: cleanText(binding.bindStatus || DEFAULT_BIND_STATUS),
   })
@@ -1399,7 +1492,7 @@ function stripResponseHopByHopHeaders(responseHeaders = {}) {
   const output = {}
   for (const [key, value] of Object.entries(responseHeaders || {})) {
     const normalizedKey = String(key || '').toLowerCase()
-    if (HOP_BY_HOP_HEADERS.has(normalizedKey)) continue
+    if (RESPONSE_HEADERS_TO_STRIP.has(normalizedKey)) continue
     output[key] = value
   }
   return output
@@ -1418,7 +1511,7 @@ async function handleRuntimeBidProxy(req, res) {
   }
 
   const binding = getBoundRuntimeByAuthorization(authorization)
-  if (!binding?.runtimeBaseUrl) {
+  if (!binding) {
     sendJson(res, 404, {
       error: {
         code: 'RUNTIME_DOMAIN_NOT_BOUND',
@@ -1433,8 +1526,31 @@ async function handleRuntimeBidProxy(req, res) {
   const headers = buildUpstreamHeaders(req)
   headers.authorization = authorization
 
+  const directRuntimeUrl = cleanText(binding.runtimeBaseUrl)
+  const canUseManagedFallback = (
+    shouldEnableManagedRuntimeFallback()
+    && shouldUseManagedRuntimeFallback(binding)
+  )
+
+  const upstreamBaseUrl = canUseManagedFallback ? resolveUpstreamBaseUrl() : ''
+  const managedTargetUrl = canUseManagedFallback
+    ? buildManagedBidTargetUrl(upstreamBaseUrl)
+    : ''
+  const targetUrl = managedTargetUrl || (directRuntimeUrl ? `${directRuntimeUrl}/api/v2/bid` : '')
+  const usingManagedFallback = Boolean(managedTargetUrl)
+
+  if (!targetUrl) {
+    sendJson(res, 404, {
+      error: {
+        code: 'RUNTIME_DOMAIN_NOT_BOUND',
+        message: 'Runtime domain is not bound for this API key.',
+      },
+    })
+    return
+  }
+
   try {
-    const upstreamResponse = await deps.fetch(`${binding.runtimeBaseUrl}/api/v2/bid`, {
+    const upstreamResponse = await deps.fetch(targetUrl, {
       method: 'POST',
       headers,
       body: requestBody,
@@ -1484,8 +1600,10 @@ async function handleRuntimeBidProxy(req, res) {
   } catch {
     sendJson(res, 502, {
       error: {
-        code: 'NETWORK_BLOCKED',
-        message: 'Failed to reach runtime domain /api/v2/bid.',
+        code: usingManagedFallback ? 'MANAGED_RUNTIME_UNAVAILABLE' : 'NETWORK_BLOCKED',
+        message: usingManagedFallback
+          ? 'Failed to reach managed runtime /api/v2/bid.'
+          : 'Failed to reach runtime domain /api/v2/bid.',
       },
     })
   }

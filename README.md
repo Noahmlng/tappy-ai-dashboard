@@ -55,12 +55,17 @@ npm run build
   Default: `runtime-gateway.tappy.ai`
 - `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME` (optional)
   Default: `0` (disabled). Set to `1` to enforce CNAME-to-gateway as a hard requirement.
+- `MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK` (optional)
+  Default: `1` (enabled). Set to `0` to disable managed runtime fallback when customer runtime probe is pending.
+- `MEDIATION_MANAGED_RUNTIME_BASE_URL` (optional)
+  Override for managed fallback base URL. If unset, derived from `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
 
 ## Onboarding Contract
 
 - SDK only requires `MEDIATION_API_KEY`.
 - `verify-and-bind` now returns `status: verified | pending | failed`.
 - `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
+- When bind status is `pending`, `sdk/bootstrap` can return `runtimeSource=managed_fallback` and a managed `runtimeBaseUrl` so SDK integration still works while custom runtime is being fixed.
 - Dashboard navigation unlocks for both `pending` and `verified`, while a top warning banner remains for `pending`.
 - Onboarding is considered complete only when `status=verified`.
 - Runtime probe uses granular codes (for example `EGRESS_BLOCKED`, `ENDPOINT_404`, `AUTH_401_403`, `LANDING_URL_MISSING`) and returns actionable `nextActions`.

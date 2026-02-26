@@ -134,6 +134,10 @@ const runtimeEvidence = computed(() => (
 const bootstrapEvidence = computed(() => (
   bootstrapResult.value ? JSON.stringify(bootstrapResult.value, null, 2) : ''
 ))
+const bootstrapRuntimeSource = computed(() => (
+  String(bootstrapResult.value?.runtimeSource || '').trim().toLowerCase()
+))
+const usingManagedRuntimeFallback = computed(() => bootstrapRuntimeSource.value === 'managed_fallback')
 
 watch(revealedSecret, (value) => {
   if (!runtimeApiKeyInput.value && value) {
@@ -248,6 +252,9 @@ function toRuntimeFailureText(payload = {}, fallback = 'Runtime probe failed.') 
     }
     return '[ENDPOINT_404] Domain is reachable, but POST /api/v2/bid is missing.'
   }
+  if (code === 'CORS_BLOCKED') {
+    return '[CORS_BLOCKED] Browser probe was blocked by CORS preflight. This does not always mean server probe is blocked.'
+  }
   return code ? `[${code}] ${detail}` : detail
 }
 
@@ -289,6 +296,11 @@ async function applyRuntimePayload(payload = {}) {
     return
   }
 
+  if (status === 'pending' && usingManagedRuntimeFallback.value) {
+    runtimeError.value = '[MANAGED_FALLBACK] Custom runtime domain is pending. SDK will use managed runtime automatically so integration can continue.'
+    return
+  }
+
   runtimeError.value = toRuntimeFailureText(payload, 'Runtime domain is not ready yet.')
 }
 
@@ -299,6 +311,15 @@ function buildBrowserProbePayload(result = {}) {
     httpStatus: Number(result.httpStatus || 0) || 0,
     detail: String(result.detail || '').trim(),
     landingUrl: String(result.landingUrl || '').trim(),
+  }
+}
+
+function isCrossOriginRuntimeBaseUrl(runtimeBaseUrl) {
+  if (typeof window === 'undefined') return false
+  try {
+    return new URL(runtimeBaseUrl).origin !== window.location.origin
+  } catch {
+    return false
   }
 }
 
@@ -390,11 +411,20 @@ async function runBrowserProbeDirect(runtimeBaseUrl, runtimeApiKey, probeHeaders
         detail: 'Browser probe timed out.',
       }
     }
+    const detail = error instanceof Error ? error.message : 'Browser probe network blocked.'
+    if (isCrossOriginRuntimeBaseUrl(runtimeBaseUrl) && /failed to fetch/i.test(detail)) {
+      return {
+        ok: false,
+        code: 'CORS_BLOCKED',
+        httpStatus: 0,
+        detail: 'Browser probe blocked by CORS preflight.',
+      }
+    }
     return {
       ok: false,
       code: 'EGRESS_BLOCKED',
       httpStatus: 0,
-      detail: error instanceof Error ? error.message : 'Browser probe network blocked.',
+      detail,
     }
   } finally {
     clearTimeout(timer)
@@ -730,6 +760,11 @@ onMounted(() => {
       <p v-if="copyState" class="copy-note">{{ copyState }}</p>
       <div v-if="bootstrapResult" class="verify-evidence">
         <p><strong>bootstrap.runtimeBaseUrl:</strong> <code>{{ bootstrapResult.runtimeBaseUrl || '-' }}</code></p>
+        <p><strong>bootstrap.runtimeSource:</strong> <code>{{ bootstrapResult.runtimeSource || 'customer' }}</code></p>
+        <p v-if="bootstrapResult.customerRuntimeBaseUrl"><strong>bootstrap.customerRuntimeBaseUrl:</strong> <code>{{ bootstrapResult.customerRuntimeBaseUrl }}</code></p>
+        <p v-if="usingManagedRuntimeFallback" class="muted">
+          Managed fallback is active. You can integrate now, then fix custom domain later.
+        </p>
         <p><strong>bootstrap.bindStatus:</strong> <code>{{ bootstrapResult.bindStatus || '-' }}</code></p>
         <p><strong>bootstrap.tenantId:</strong> <code>{{ bootstrapResult.tenantId || '-' }}</code></p>
         <pre class="code-block">{{ bootstrapEvidence }}</pre>
@@ -741,6 +776,7 @@ onMounted(() => {
       <ul class="checklist">
         <li>Runtime API key is available (generated in Step A or existing key)</li>
         <li>Domain bind returns <code>verified</code> or <code>pending</code> (Step B)</li>
+        <li>If <code>pending</code>, SDK may auto-switch to managed fallback so integration still works (Step C)</li>
         <li>Probe diagnostics show actionable code and next actions (Step B)</li>
         <li>Only <code>verified</code> marks onboarding complete; <code>pending</code> keeps warning banner</li>
       </ul>
