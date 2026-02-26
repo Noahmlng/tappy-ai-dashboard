@@ -20,14 +20,13 @@ npm run dev
 
 The SPA always calls same-origin `/api/*`.
 
-- For local development, `vite` proxies `/api` to `MEDIATION_CONTROL_PLANE_API_PROXY_TARGET`.
-- For Vercel/production, `/api/*` is handled by `api/[...path].js` and forwarded to `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
-- Runtime onboarding now uses:
+- `GET/POST /api/v1/*` (control-plane routes) are proxied to `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
+- `POST /api/v2/bid` is proxied directly to `MEDIATION_RUNTIME_API_BASE_URL`.
+- Removed routes now return `410`:
+  - `GET /api/v1/public/sdk/bootstrap`
   - `POST /api/v1/public/runtime-domain/verify-and-bind`
   - `POST /api/v1/public/runtime-domain/probe`
-  - `GET /api/v1/public/sdk/bootstrap`
-  - `POST /api/v2/bid` (normalized to include `landingUrl`)
-  - `POST /api/ad/bid` (returns `filled` with structured no-fill diagnostics)
+  - `POST /api/ad/bid`
 
 ## Build
 
@@ -49,42 +48,23 @@ npm run build
 ## Environment Variables
 
 - `MEDIATION_CONTROL_PLANE_API_BASE_URL` (required in production)
-  Example: `https://<your-control-plane-origin>/api`
-- `MEDIATION_CONTROL_PLANE_API_PROXY_TARGET` (optional, local dev only)
-  Default: `http://127.0.0.1:3100`
-- `MEDIATION_RUNTIME_GATEWAY_HOST` (optional)
-  Default: `runtime-gateway.tappy.ai`
-- `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME` (optional)
-  Default: `0` (disabled). Set to `1` to enforce CNAME-to-gateway as a hard requirement.
-- `MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK` (optional)
-  Default: `1` (enabled). Set to `0` to disable managed runtime fallback routing when bindStatus is pending/failed.
-- `MEDIATION_MANAGED_RUNTIME_BASE_URL` (optional)
-  Explicit managed runtime base URL for fallback mode. If unset, proxy auto-derives from `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
+  - Example: `https://<your-control-plane-origin>/api`
+- `MEDIATION_RUNTIME_API_BASE_URL` (required in production)
+  - Example: `https://<your-runtime-origin>/api`
+- `MEDIATION_CONTROL_PLANE_API_PROXY_TARGET` (optional, local Vite dev only)
+  - Default: `http://127.0.0.1:3100`
 
-## Onboarding Contract
+## MVP Onboarding Contract
 
-- SDK/backend integration requires `MEDIATION_API_KEY`.
-- Hosted bootstrap origin is fixed at `https://tappy-ai-dashboard.vercel.app/api/v1/public/sdk/bootstrap` in the integration snippet, so no extra bootstrap env is required in normal onboarding.
-- `sdk/bootstrap` routing is strict: `customer(verified)` -> `managed_fallback(pending/failed)`; `unbound` is treated as non-routable and returns `BINDING_NOT_READY`.
-- `verify-and-bind` now returns `status: verified | pending | failed`.
-- `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
-- When bind status is `pending`, `sdk/bootstrap` can return `runtimeSource=managed_fallback` and a managed `runtimeBaseUrl` so SDK integration still works while custom runtime is being fixed.
-- For `bindStatus=unbound`, bootstrap returns `503` with `error.code=BINDING_NOT_READY`.
-- `/api/ad/bid` always returns `filled`; when `filled=false`, payload includes:
-  - `reasonCode`, `reasonMessage`, `nextAction`
-  - `requestId`, `traceId`
-  - `bindStatus`, `tenantId`, `routeCode`, `upstreamStatus`
-- Dashboard navigation unlocks for both `pending` and `verified`, while a top warning banner remains for `pending`.
-- Onboarding is considered complete only when `status=verified`.
-- Runtime probe uses granular codes (for example `EGRESS_BLOCKED`, `ENDPOINT_404`, `AUTH_401_403`, `LANDING_URL_MISSING`) and returns actionable `nextActions`.
-- If `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME=1`, verify-and-bind also requires CNAME to the configured runtime gateway.
+- Required:
+  - Generate runtime key
+  - Call `POST /api/v2/bid`
+- Optional enhancement:
+  - Call `POST /api/v1/sdk/events`
+- Optional diagnostics:
+  - Call `GET /api/v1/mediation/config`
 
-## No-Fill Troubleshooting
-
-- If `/api/ad/bid` returns `reasonCode=BINDING_NOT_READY`, the API key is still `bindStatus=unbound`; this is a binding/config readiness issue, not a transport issue.
-- Use `traceId` to correlate dashboard proxy logs.
-- If present, use `requestId` to correlate upstream runtime/mediation logs.
-- Check `bindStatus`, `tenantId`, `routeCode`, and `upstreamStatus` to identify whether the no-fill happened before routing (`upstreamStatus=0`) or upstream (`upstreamStatus>0`).
+`No bid` with HTTP 200 is a valid business result (not an integration error).
 
 ## Auth Model
 
@@ -93,15 +73,12 @@ Dashboard auth uses cookie sessions.
 - `dash_session`: HttpOnly + Secure + SameSite=Lax + Path=/
 - `dash_csrf`: Secure + SameSite=Lax
 - Browser write requests send `x-csrf-token` from `dash_csrf`
-- Client request strategy:
-  - Dashboard APIs use cookie + CSRF by default
-  - Runtime onboarding APIs require explicit `Authorization: Bearer <MEDIATION_API_KEY>`
-  - For legacy upstream compatibility, dashboard requests may retry once with stored bearer token only after 401/403
+- Dashboard APIs use cookie + CSRF by default
 
 ## Deploy (Vercel)
 
 1. Import this repo in Vercel.
-2. Set `MEDIATION_CONTROL_PLANE_API_BASE_URL` for Preview and Production.
+2. Set `MEDIATION_CONTROL_PLANE_API_BASE_URL` and `MEDIATION_RUNTIME_API_BASE_URL` for Preview and Production.
 3. Add GitHub repository secrets:
    - `VERCEL_TOKEN`
    - `VERCEL_ORG_ID`
