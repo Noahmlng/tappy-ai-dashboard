@@ -28,6 +28,8 @@ const probeHeaderKey1 = ref('')
 const probeHeaderValue1 = ref('')
 const probeHeaderKey2 = ref('')
 const probeHeaderValue2 = ref('')
+const BROWSER_PROBE_TIMEOUT_MS = 8_000
+const RUNTIME_DOMAIN_STORAGE_KEY = 'onboarding.runtime_domain'
 
 const placementId = 'chat_from_answer_v1'
 
@@ -71,6 +73,12 @@ const runtimeBindStateLabel = computed(() => {
   if (runtimeStatus.value === 'failed') return 'Rejected'
   return '-'
 })
+const showLiveProbeButton = computed(() => (
+  hasAvailableKey.value && (
+    onboardingStatus.value === 'pending'
+    || (runtimeStatus.value !== '' && runtimeStatus.value !== 'verified')
+  )
+))
 const showBrowserProbeButton = computed(() => {
   if (!hasAvailableKey.value) return false
   if (!runtimeResult.value) return false
@@ -133,12 +141,30 @@ watch(revealedSecret, (value) => {
   }
 })
 
+watch(domainInput, (value) => {
+  if (typeof window === 'undefined') return
+  try {
+    const normalized = String(value || '').trim()
+    if (!normalized) {
+      window.localStorage.removeItem(RUNTIME_DOMAIN_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(RUNTIME_DOMAIN_STORAGE_KEY, normalized)
+  } catch {
+    // ignore storage errors
+  }
+})
+
 function normalizeRuntimeBaseUrl(value) {
   const input = String(value || '').trim()
   if (!input) return ''
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input)
     ? input.replace(/\/$/, '')
     : `https://${input}`
+}
+
+function resolveRuntimeApiKey() {
+  return String(runtimeApiKeyInput.value || revealedSecret.value || '').trim()
 }
 
 function buildProbeHeaders() {
@@ -218,7 +244,7 @@ function toRuntimeFailureText(payload = {}, fallback = 'Runtime probe failed.') 
 }
 
 async function refreshBootstrap() {
-  const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
+  const runtimeApiKey = resolveRuntimeApiKey()
   if (!runtimeApiKey) return
   try {
     const bootstrap = await controlPlaneClient.sdk.bootstrap({
@@ -264,10 +290,16 @@ async function runBrowserProbeDirect(runtimeBaseUrl, runtimeApiKey, probeHeaders
     'Content-Type': 'application/json',
   }
 
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort()
+  }, BROWSER_PROBE_TIMEOUT_MS)
+
   try {
     const response = await fetch(`${runtimeBaseUrl}/api/v2/bid`, {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         userId: 'browser_probe_user',
         chatId: 'browser_probe_chat',
@@ -330,18 +362,29 @@ async function runBrowserProbeDirect(runtimeBaseUrl, runtimeApiKey, probeHeaders
       landingUrl,
     }
   } catch (error) {
+    clearTimeout(timer)
+    if (error instanceof Error && error.name === 'AbortError') {
+      return {
+        ok: false,
+        code: 'EGRESS_BLOCKED',
+        httpStatus: 0,
+        detail: 'Browser probe timed out.',
+      }
+    }
     return {
       ok: false,
       code: 'EGRESS_BLOCKED',
       httpStatus: 0,
       detail: error instanceof Error ? error.message : 'Browser probe network blocked.',
     }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
 async function syncProbeWithServer({ runBrowserProbe = false, browserProbe = null } = {}) {
   const domain = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
+  const runtimeApiKey = resolveRuntimeApiKey()
   const probeHeaders = buildProbeHeaders()
 
   const payload = await controlPlaneClient.runtimeDomain.probe(
@@ -400,7 +443,7 @@ async function bindRuntimeDomain() {
   bootstrapResult.value = null
 
   const runtimeBaseUrl = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
+  const runtimeApiKey = resolveRuntimeApiKey()
   const probeHeaders = buildProbeHeaders()
 
   if (!runtimeBaseUrl) {
@@ -443,7 +486,7 @@ async function runLiveProbe() {
   runtimeError.value = ''
 
   const runtimeBaseUrl = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
+  const runtimeApiKey = resolveRuntimeApiKey()
   if (!runtimeBaseUrl || !runtimeApiKey) {
     runtimeError.value = 'Runtime domain and API key are required before live probe.'
     liveProbeLoading.value = false
@@ -469,7 +512,7 @@ async function runBrowserProbe({ silent = false } = {}) {
   if (!silent) runtimeError.value = ''
 
   const runtimeBaseUrl = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = String(runtimeApiKeyInput.value || '').trim()
+  const runtimeApiKey = resolveRuntimeApiKey()
   if (!runtimeBaseUrl || !runtimeApiKey) {
     runtimeError.value = 'Runtime domain and API key are required before browser probe.'
     browserProbeLoading.value = false
@@ -503,6 +546,19 @@ async function copyText(value) {
 }
 
 onMounted(() => {
+  if (typeof window !== 'undefined') {
+    try {
+      const cachedDomain = String(window.localStorage.getItem(RUNTIME_DOMAIN_STORAGE_KEY) || '').trim()
+      if (cachedDomain && !domainInput.value) {
+        domainInput.value = cachedDomain
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+  if (!runtimeApiKeyInput.value && revealedSecret.value) {
+    runtimeApiKeyInput.value = revealedSecret.value
+  }
   hydrateApiKeys()
 })
 </script>
@@ -567,31 +623,42 @@ onMounted(() => {
       </div>
 
       <div class="form-grid">
-        <label>
-          Probe Header Key (optional)
-          <input v-model="probeHeaderKey1" class="input" type="text" placeholder="x-vercel-protection-bypass">
-        </label>
-        <label>
-          Probe Header Value (optional)
-          <input v-model="probeHeaderValue1" class="input" type="password" placeholder="token_1">
-        </label>
-      </div>
-      <div class="form-grid">
-        <label>
-          Probe Header Key 2 (optional)
-          <input v-model="probeHeaderKey2" class="input" type="text" placeholder="cf-access-client-id">
-        </label>
-        <label>
-          Probe Header Value 2 (optional)
-          <input v-model="probeHeaderValue2" class="input" type="password" placeholder="token_2">
-        </label>
+        <details class="verify-disclosure">
+          <summary>Advanced (optional): Probe headers for protected runtimes</summary>
+          <div class="form-grid">
+            <label>
+              Probe Header Key
+              <input v-model="probeHeaderKey1" class="input" type="text" placeholder="x-vercel-protection-bypass">
+            </label>
+            <label>
+              Probe Header Value
+              <input v-model="probeHeaderValue1" class="input" type="password" placeholder="token_1">
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
+              Probe Header Key 2
+              <input v-model="probeHeaderKey2" class="input" type="text" placeholder="cf-access-client-id">
+            </label>
+            <label>
+              Probe Header Value 2
+              <input v-model="probeHeaderValue2" class="input" type="password" placeholder="token_2">
+            </label>
+          </div>
+        </details>
       </div>
 
       <div class="toolbar-actions">
         <button class="button" type="button" :disabled="bindLoading || !hasAvailableKey" @click="bindRuntimeDomain">
           {{ bindLoading ? 'Binding...' : 'Bind domain' }}
         </button>
-        <button class="button button-secondary" type="button" :disabled="liveProbeLoading || !hasAvailableKey" @click="runLiveProbe">
+        <button
+          v-if="showLiveProbeButton"
+          class="button button-secondary"
+          type="button"
+          :disabled="liveProbeLoading || !hasAvailableKey"
+          @click="runLiveProbe"
+        >
           {{ liveProbeLoading ? 'Probing...' : 'Run live probe' }}
         </button>
         <button

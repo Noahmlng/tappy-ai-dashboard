@@ -76,6 +76,8 @@ function createDashboardSnapshot(placements, appId) {
 }
 
 test.describe('dashboard smoke flow', () => {
+  let runtimeBindScenario = 'verified'
+
   test.beforeEach(async ({ page }) => {
     const rotateKeyPath = /^\/api\/v1\/public\/credentials\/keys\/[^/]+\/rotate$/
     const revokeKeyPath = /^\/api\/v1\/public\/credentials\/keys\/[^/]+\/revoke$/
@@ -86,6 +88,8 @@ test.describe('dashboard smoke flow', () => {
     let onboardingVerifiedAt = ''
     let scopedAppId = ''
     let createKeyAttempts = 0
+    let runtimeProbeAttempts = 0
+    runtimeBindScenario = 'verified'
 
     let keys = []
     let placements = [
@@ -238,6 +242,38 @@ test.describe('dashboard smoke flow', () => {
       if (pathname === '/api/v1/public/runtime-domain/verify-and-bind' && method === 'POST') {
         const payload = JSON.parse(request.postData() || '{}')
         const runtimeDomain = String(payload.domain || 'runtime.customer-example.org')
+        if (runtimeBindScenario === 'pending') {
+          onboardingStatus = 'pending'
+          onboardingVerifiedAt = ''
+          await json(200, {
+            status: 'pending',
+            bindStage: 'probe_failed',
+            requestId: 'req_bind_pending_1',
+            runtimeBaseUrl: `https://${runtimeDomain}`,
+            failureCode: 'EGRESS_BLOCKED',
+            probeResult: {
+              source: 'server',
+              ok: false,
+              code: 'EGRESS_BLOCKED',
+              detail: 'Runtime bid probe failed.',
+            },
+            nextActions: [
+              'Run Browser Probe to verify user-side reachability.',
+              'If Browser Probe passes, allow-list control-plane egress IPs or relax edge protection.',
+            ],
+            checks: {
+              dnsOk: true,
+              cnameOk: false,
+              tlsOk: true,
+              connectOk: true,
+              authOk: false,
+              bidOk: false,
+              landingUrlOk: false,
+            },
+          })
+          return
+        }
+
         onboardingStatus = 'verified'
         onboardingVerifiedAt = '2026-02-26T12:00:00.000Z'
         await json(200, {
@@ -246,6 +282,12 @@ test.describe('dashboard smoke flow', () => {
           requestId: 'req_bind_1',
           verifiedAt: onboardingVerifiedAt,
           runtimeBaseUrl: `https://${runtimeDomain}`,
+          probeResult: {
+            source: 'server',
+            ok: true,
+            code: 'VERIFIED',
+            detail: 'Runtime bid probe succeeded.',
+          },
           landingUrlSample: 'https://ads.customer-example.org/deal-1',
           checks: {
             dnsOk: true,
@@ -261,6 +303,35 @@ test.describe('dashboard smoke flow', () => {
       }
 
       if (pathname === '/api/v1/public/runtime-domain/probe' && method === 'POST') {
+        runtimeProbeAttempts += 1
+        if (runtimeBindScenario === 'pending' && runtimeProbeAttempts === 1) {
+          onboardingStatus = 'pending'
+          onboardingVerifiedAt = ''
+          await json(200, {
+            status: 'pending',
+            finalStatus: 'pending',
+            requestId: 'req_probe_pending_1',
+            runtimeBaseUrl: 'https://runtime.customer-example.org',
+            failureCode: 'EGRESS_BLOCKED',
+            probeResult: {
+              source: 'server',
+              ok: false,
+              code: 'EGRESS_BLOCKED',
+              detail: 'Runtime bid probe failed.',
+            },
+            serverProbe: {
+              source: 'server',
+              ok: false,
+              code: 'EGRESS_BLOCKED',
+              detail: 'Runtime bid probe failed.',
+            },
+            nextActions: [
+              'Run Browser Probe to verify user-side reachability.',
+            ],
+          })
+          return
+        }
+
         onboardingStatus = 'verified'
         onboardingVerifiedAt = '2026-02-26T12:00:00.000Z'
         await json(200, {
@@ -293,6 +364,7 @@ test.describe('dashboard smoke flow', () => {
           },
           tenantId: 'tenant_smoke_1',
           keyScope: 'tenant',
+          bindStatus: onboardingStatus,
         })
         return
       }
@@ -322,6 +394,23 @@ test.describe('dashboard smoke flow', () => {
       }
 
       await json(404, { error: { code: 'NOT_FOUND', message: `${method} ${pathname}` } })
+    })
+
+    await page.route('**/api/v2/bid', async (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      if (url.hostname.includes('runtime.customer-example.org')) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json; charset=utf-8',
+          body: JSON.stringify({
+            requestId: 'req_browser_probe_1',
+            landingUrl: 'https://ads.customer-example.org/deal-1',
+          }),
+        })
+        return
+      }
+      await route.continue()
     })
   })
 
@@ -357,23 +446,91 @@ test.describe('dashboard smoke flow', () => {
     await page.getByRole('button', { name: 'Bind domain' }).click()
     await expect(page.getByText('bindState:')).toBeVisible()
     await expect(page.locator('.meta-pill.good')).toHaveText('Verified')
+    await expect(page.locator('p:has-text("probeCode:") code')).toContainText('VERIFIED')
+    await expect(page.locator('p:has-text("bootstrap.bindStatus:") code')).toContainText('verified')
+    await expect(page.getByText('Step C: Copy SDK integration')).toBeVisible()
+    await expect(page.locator('p.muted code').filter({ hasText: 'MEDIATION_API_KEY' })).toBeVisible()
+
+    await page.locator('aside .nav-link[href="/home"]').first().click()
+    await expect(page).toHaveURL(/\/home$/)
+    await expect(page.getByRole('heading', { name: 'Revenue', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Sync' }).first().click()
+    await expect(page.getByText('Core')).toBeVisible()
 
     await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(1)
     await page.locator('aside .nav-link[href="/usage"]').first().click()
     await expect(page).toHaveURL(/\/usage$/)
     await expect(page.getByRole('heading', { name: 'Usage & Revenue' })).toBeVisible()
+    await page.getByRole('button', { name: 'Refresh' }).click()
+    await expect(page.getByText('Settlement Summary')).toBeVisible()
+
+    await page.locator('aside .nav-link[href="/api-keys"]').first().click()
+    await expect(page).toHaveURL(/\/api-keys$/)
+    await expect(page.getByRole('heading', { name: 'Key', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Generate key' }).first().click()
+    await expect(page.locator('.secret-banner code')).toHaveText(/sk_live_/)
+    await page.getByRole('button', { name: 'Rotate' }).first().click()
+    await expect(page.getByText('sk_live_rotated****')).toBeVisible()
+    await page.getByRole('button', { name: 'Revoke' }).first().click()
+    await expect(page.getByText('revoked').first()).toBeVisible()
 
     await page.locator('aside .nav-link[href="/config"]').first().click()
     await expect(page).toHaveURL(/\/config$/)
     await expect(page.getByRole('heading', { name: 'Placement', exact: true })).toBeVisible()
+    await page.locator('.inline-switch input').first().uncheck()
+    await expect(page.locator('.inline-switch span').first()).toHaveText('Off')
+    await page.locator('.inline-switch input').first().check()
+    await expect(page.locator('.inline-switch span').first()).toHaveText('On')
+    await page.getByLabel('Ad Type').first().selectOption('search')
+    await expect(page.getByLabel('Ad Type').first()).toHaveValue('search')
+    await page.getByLabel('Fanout').first().fill('4')
+    await page.getByLabel('Fanout').first().press('Enter')
+    await page.getByRole('button', { name: 'Sync' }).first().click()
 
     await page.locator('aside .nav-link[href="/logs"]').first().click()
     await expect(page).toHaveURL(/\/logs$/)
     await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible()
+    await page.getByLabel('Result').selectOption('served')
+    await expect(page.getByText('eligible')).toBeVisible()
+    await page.getByLabel('Result').selectOption('no_fill')
+    await expect(page.getByText('No rows.')).toBeVisible()
+    await page.getByRole('button', { name: 'Sync' }).first().click()
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)
     await expect(page.getByRole('heading', { name: 'Sign In' })).toBeVisible()
+  })
+
+  test('pending bind unlocks navigation with warning, then probe upgrades to verified', async ({ page }) => {
+    runtimeBindScenario = 'pending'
+    await page.goto('/login')
+
+    await page.getByLabel('Email').fill('smoke@example.com')
+    await page.getByLabel('Password').fill('smoke-password')
+    await page.getByRole('button', { name: 'Sign In' }).click()
+
+    await expect(page).toHaveURL(/\/onboarding$/)
+    await page.getByRole('button', { name: 'Generate key' }).click()
+    await expect(page.locator('.secret-banner code')).toHaveText('sk_live_new_secret')
+
+    await page.getByLabel('Runtime domain').fill('runtime.customer-example.org')
+    await page.getByLabel('Runtime API key').fill('sk_live_new_secret')
+    await page.getByRole('button', { name: 'Bind domain' }).click()
+
+    await expect(page.locator('.meta-pill.warn')).toHaveText('Pending')
+    await expect(page.getByText('Runtime Not Ready')).toBeVisible()
+    await expect(page.locator('p:has-text("probeCode:") code')).toHaveText('EGRESS_BLOCKED')
+    await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(1)
+
+    await page.locator('aside .nav-link[href="/home"]').first().click()
+    await expect(page).toHaveURL(/\/home$/)
+    await expect(page.getByText('Runtime Not Ready')).toBeVisible()
+
+    await page.locator('aside .nav-link[href="/onboarding"]').first().click()
+    await page.getByRole('button', { name: 'Run live probe' }).click()
+
+    await expect(page.locator('.meta-pill.good')).toHaveText('Verified')
+    await expect(page.getByText('Runtime Not Ready')).toHaveCount(0)
   })
 
   test('unauthenticated onboarding access redirects to login with return path', async ({ page }) => {

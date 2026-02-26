@@ -20,10 +20,10 @@ const navItems = computed(() => {
   return [
     { to: '/onboarding', label: 'Onboarding', icon: 'flash' },
     { to: '/home', label: 'Revenue', icon: 'home' },
+    { to: '/logs', label: 'Logs', icon: 'list' },
     { to: '/usage', label: 'Usage', icon: 'chart' },
     { to: '/api-keys', label: 'Key', icon: 'key' },
     { to: '/config', label: 'Placement', icon: 'sliders' },
-    { to: '/logs', label: 'Logs', icon: 'list' },
   ]
 })
 
