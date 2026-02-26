@@ -1099,7 +1099,9 @@ export function normalizeUpstreamBaseUrl(rawValue) {
 export function resolveUpstreamBaseUrl(env = process.env) {
   const candidates = [
     env.MEDIATION_CONTROL_PLANE_API_BASE_URL,
+    env.VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL,
     env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
+    env.VITE_MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
   ]
   for (const candidate of candidates) {
     const normalized = normalizeUpstreamBaseUrl(candidate)
@@ -1124,9 +1126,7 @@ function normalizePublicBaseUrl(rawValue) {
 
 export function resolveManagedRuntimeBaseUrl(env = process.env) {
   const explicit = normalizePublicBaseUrl(env.MEDIATION_MANAGED_RUNTIME_BASE_URL)
-  const fallback = explicit || normalizeUpstreamBaseUrl(
-    env.MEDIATION_CONTROL_PLANE_API_BASE_URL || env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
-  )
+  const fallback = explicit || resolveUpstreamBaseUrl(env)
   if (!fallback) return ''
   try {
     const parsed = new URL(fallback)
