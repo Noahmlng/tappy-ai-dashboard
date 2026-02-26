@@ -21,7 +21,7 @@ npm run dev
 The SPA always calls same-origin `/api/*`.
 
 - `GET/POST /api/v1/*` (control-plane routes) are proxied to `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
-- `POST /api/v2/bid` is proxied directly to `MEDIATION_RUNTIME_API_BASE_URL`.
+- `POST /api/v2/bid` is proxied to `MEDIATION_RUNTIME_API_BASE_URL` when set, otherwise falls back to `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
 - Removed routes now return `410`:
   - `GET /api/v1/public/sdk/bootstrap`
   - `POST /api/v1/public/runtime-domain/verify-and-bind`
@@ -49,7 +49,7 @@ npm run build
 
 - `MEDIATION_CONTROL_PLANE_API_BASE_URL` (required in production)
   - Example: `https://<your-control-plane-origin>/api`
-- `MEDIATION_RUNTIME_API_BASE_URL` (required in production)
+- `MEDIATION_RUNTIME_API_BASE_URL` (optional runtime override)
   - Example: `https://<your-runtime-origin>/api`
 - `MEDIATION_CONTROL_PLANE_API_PROXY_TARGET` (optional, local Vite dev only)
   - Default: `http://127.0.0.1:3100`
@@ -78,7 +78,8 @@ Dashboard auth uses cookie sessions.
 ## Deploy (Vercel)
 
 1. Import this repo in Vercel.
-2. Set `MEDIATION_CONTROL_PLANE_API_BASE_URL` and `MEDIATION_RUNTIME_API_BASE_URL` for Preview and Production.
+2. Set `MEDIATION_CONTROL_PLANE_API_BASE_URL` for Preview and Production.
+   - Optional: set `MEDIATION_RUNTIME_API_BASE_URL` only when runtime traffic must go to a different origin.
 3. Add GitHub repository secrets:
    - `VERCEL_TOKEN`
    - `VERCEL_ORG_ID`

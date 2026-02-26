@@ -100,6 +100,10 @@ describe('api proxy helpers', () => {
     expect(resolveRuntimeApiBaseUrl({
       MEDIATION_RUNTIME_API_BASE_URL: 'https://rt.example.com',
     })).toBe('https://rt.example.com/api')
+
+    expect(resolveRuntimeApiBaseUrl({
+      MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://cp.example.com',
+    })).toBe('https://cp.example.com/api')
   })
 
   it('strips browser-only cors headers and keeps server-relevant headers', () => {
@@ -192,6 +196,8 @@ describe('dashboardApiProxyHandler', () => {
 
   it('returns explicit error when runtime target is missing for /api/v2/bid', async () => {
     delete process.env.MEDIATION_RUNTIME_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
 
     const req = createMockReq('/api/v2/bid', 'POST', {
       authorization: 'Bearer sk_runtime_1',
@@ -206,6 +212,40 @@ describe('dashboardApiProxyHandler', () => {
 
     expect(res.statusCode).toBe(500)
     expect(JSON.parse(res.body).error.code).toBe('PROXY_RUNTIME_TARGET_NOT_CONFIGURED')
+  })
+
+  it('falls back to control-plane base URL for /api/v2/bid when runtime env is missing', async () => {
+    delete process.env.MEDIATION_RUNTIME_API_BASE_URL
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://cp.example.com'
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(createJsonUpstreamResponse({
+      requestId: 'req_runtime_2',
+      url: 'https://ads.customer.example/deal-2',
+    }))
+
+    const req = createMockReq('/api/v2/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_2',
+      'content-type': 'application/json',
+    })
+    req.body = {
+      messages: [{ role: 'user', content: 'find a deal' }],
+    }
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://cp.example.com/api/v2/bid',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['x-tappy-runtime-source']).toBe('runtime_api_base_url')
+    expect(JSON.parse(res.body)).toMatchObject({
+      requestId: 'req_runtime_2',
+      landingUrl: 'https://ads.customer.example/deal-2',
+    })
   })
 
   it('keeps generic control-plane proxy forwarding intact', async () => {

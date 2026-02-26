@@ -254,7 +254,9 @@ export function resolveUpstreamBaseUrl(env = process.env) {
 }
 
 export function resolveRuntimeApiBaseUrl(env = process.env) {
-  return normalizeUpstreamBaseUrl(env.MEDIATION_RUNTIME_API_BASE_URL)
+  const explicitRuntimeUrl = normalizeUpstreamBaseUrl(env.MEDIATION_RUNTIME_API_BASE_URL)
+  if (explicitRuntimeUrl) return explicitRuntimeUrl
+  return resolveUpstreamBaseUrl(env)
 }
 
 function normalizePublicBaseUrl(rawValue) {
@@ -716,7 +718,7 @@ async function handleRuntimeBidProxy(req, res) {
     sendJson(res, 500, {
       error: {
         code: 'PROXY_RUNTIME_TARGET_NOT_CONFIGURED',
-        message: 'Set MEDIATION_RUNTIME_API_BASE_URL to your runtime API origin (with or without /api suffix).',
+        message: 'Set MEDIATION_CONTROL_PLANE_API_BASE_URL (or MEDIATION_CONTROL_PLANE_API_PROXY_TARGET). MEDIATION_RUNTIME_API_BASE_URL is optional as an override.',
       },
     })
     return

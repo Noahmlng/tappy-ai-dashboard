@@ -19,14 +19,13 @@ const accountId = computed(() => String(scopeState.accountId || authState.user?.
 const appId = computed(() => String(scopeState.appId || authState.user?.appId || '').trim())
 
 const envSnippet = computed(() => (
-  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}
-MEDIATION_RUNTIME_API_BASE_URL=https://runtime.example.com/api`
+  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`
 ))
 
 const integrationSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
-const runtimeApiBaseUrl = process.env.MEDIATION_RUNTIME_API_BASE_URL;
+const bidEndpoint = 'https://<your-dashboard-domain>/api/v2/bid';
 
-const bidRes = await fetch(\`${'${runtimeApiBaseUrl}'}/v2/bid\`, {
+const bidRes = await fetch(bidEndpoint, {
   method: 'POST',
   headers: {
     'Authorization': \`Bearer ${'${apiKey}'}\`,
