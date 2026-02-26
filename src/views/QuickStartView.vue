@@ -89,11 +89,25 @@ const showBrowserProbeButton = computed(() => {
   return runtimeStatus.value === 'pending' || runtimeBindStage.value === 'probe_failed'
 })
 
-const envSnippet = computed(() => `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`)
+const bootstrapOriginHint = computed(() => {
+  if (typeof window !== 'undefined' && window?.location?.origin) {
+    return String(window.location.origin).trim().replace(/\/$/, '')
+  }
+  return 'https://tappy-ai-dashboard.vercel.app'
+})
+
+const envSnippet = computed(() => [
+  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`,
+  `MEDIATION_BOOTSTRAP_ORIGIN=${bootstrapOriginHint.value}`,
+].join('\n'))
 
 const sdkSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
+const bootstrapOrigin = (process.env.MEDIATION_BOOTSTRAP_ORIGIN || '').replace(/\\/$/, '');
+const bootstrapUrl = bootstrapOrigin
+  ? \`${'${bootstrapOrigin}'}/api/v1/public/sdk/bootstrap\`
+  : '/api/v1/public/sdk/bootstrap';
 
-const bootstrapRes = await fetch('/api/v1/public/sdk/bootstrap', {
+const bootstrapRes = await fetch(bootstrapUrl, {
   method: 'GET',
   headers: {
     'Authorization': \`Bearer ${'${apiKey}'}\`
@@ -750,7 +764,10 @@ onMounted(() => {
         </button>
       </div>
       <pre class="code-block">{{ envSnippet }}</pre>
-      <p class="muted">Only one env var is required: <code>MEDIATION_API_KEY</code>.</p>
+      <p class="muted">
+        Backend integration requires <code>MEDIATION_API_KEY</code> and <code>MEDIATION_BOOTSTRAP_ORIGIN</code>.
+        You may omit <code>MEDIATION_BOOTSTRAP_ORIGIN</code> only if your backend already proxies same-origin <code>/api</code> to Control Plane.
+      </p>
 
       <div class="panel-toolbar">
         <h3>Bootstrap + bid call</h3>
