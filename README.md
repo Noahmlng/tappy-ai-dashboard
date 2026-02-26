@@ -29,6 +29,16 @@ The SPA always calls same-origin `/api/*`.
 npm run build
 ```
 
+## Quality Gates
+
+```bash
+npm run check:env
+npm run lint
+npm test
+npm run test:smoke
+npm run build
+```
+
 ## Environment Variables
 
 - `MEDIATION_CONTROL_PLANE_API_BASE_URL` (required in production)
@@ -48,5 +58,9 @@ Dashboard auth uses cookie sessions.
 
 1. Import this repo in Vercel.
 2. Set `MEDIATION_CONTROL_PLANE_API_BASE_URL` for Preview and Production.
-3. (Optional) Set `NODE_AUTH_TOKEN` only if private npm packages are required.
-4. PRs deploy Preview; `main` deploys Production.
+3. Add GitHub repository secrets:
+   - `VERCEL_TOKEN`
+   - `VERCEL_ORG_ID`
+   - `VERCEL_PROJECT_ID`
+   - `NODE_AUTH_TOKEN` (optional, only if private npm packages are required)
+4. PRs deploy Preview; pushes to `main` deploy Production.
