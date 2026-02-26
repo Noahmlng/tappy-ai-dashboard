@@ -62,10 +62,8 @@ npm run build
 
 ## Onboarding Contract
 
-- Backend integration requires:
-  - `MEDIATION_API_KEY`
-  - `MEDIATION_BOOTSTRAP_ORIGIN` (origin that serves `/api/v1/public/sdk/bootstrap`, for example your dashboard origin)
-- `MEDIATION_BOOTSTRAP_ORIGIN` can be omitted only if your backend already proxies same-origin `/api/*` to control-plane APIs.
+- SDK/backend integration requires `MEDIATION_API_KEY`.
+- `MEDIATION_BOOTSTRAP_ORIGIN` is optional and only used to override the default hosted bootstrap origin (for private/self-hosted setups).
 - `verify-and-bind` now returns `status: verified | pending | failed`.
 - `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
 - When bind status is `pending`, `sdk/bootstrap` can return `runtimeSource=managed_fallback` and a managed `runtimeBaseUrl` so SDK integration still works while custom runtime is being fixed.
