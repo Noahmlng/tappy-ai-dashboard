@@ -72,6 +72,19 @@ export function setDashboardAccessToken(value = '') {
   }
 }
 
+function readStoredDashboardAccessToken() {
+  if (typeof window === 'undefined' || !window?.localStorage) return ''
+  try {
+    return String(window.localStorage.getItem(DASHBOARD_ACCESS_TOKEN_STORAGE_KEY) || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+function getDashboardAccessToken() {
+  return readStoredDashboardAccessToken()
+}
+
 function normalizeAuthMode(rawValue) {
   const normalized = String(rawValue || '').trim().toLowerCase()
   if (normalized === 'bearer' || normalized === 'none') return normalized
@@ -108,6 +121,7 @@ function createRequestHeaders(method, options = {}) {
 async function requestJson(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase()
   const url = `${API_BASE_URL}${appendQuery(path, options.query)}`
+  const baseHeaders = options.headers || {}
   const headers = createRequestHeaders(method, {
     headers: options.headers || {},
     authMode: options.authMode || 'cookie',
@@ -120,12 +134,37 @@ async function requestJson(path, options = {}) {
     body = JSON.stringify(body)
   }
 
-  const response = await fetch(url, {
+  const requestInit = {
     method,
-    headers,
     body,
     credentials: 'include',
+  }
+  let response = await fetch(url, {
+    ...requestInit,
+    headers,
   })
+
+  // Dashboard path fallback: cookie-first, then retry once with bearer if upstream still returns auth failure.
+  const authMode = normalizeAuthMode(options.authMode || 'cookie')
+  const shouldTryBearerFallback = (
+    authMode === 'cookie'
+    && options.allowBearerFallback !== false
+    && (response.status === 401 || response.status === 403)
+  )
+  if (shouldTryBearerFallback) {
+    const fallbackToken = cleanText(options.bearerFallbackToken || getDashboardAccessToken())
+    const hasAuthorization = Object.keys(baseHeaders).some((key) => key.toLowerCase() === 'authorization')
+    if (fallbackToken && !hasAuthorization) {
+      const retryHeaders = {
+        ...headers,
+        Authorization: `Bearer ${fallbackToken}`,
+      }
+      response = await fetch(url, {
+        ...requestInit,
+        headers: retryHeaders,
+      })
+    }
+  }
 
   const contentType = String(response.headers.get('content-type') || '').toLowerCase()
   const payload = contentType.includes('application/json')

@@ -14,6 +14,7 @@ function jsonResponse(payload, status = 200) {
 afterEach(() => {
   vi.restoreAllMocks()
   Reflect.deleteProperty(globalThis, 'document')
+  Reflect.deleteProperty(globalThis, 'window')
   setDashboardAccessToken('')
 })
 
@@ -76,6 +77,39 @@ describe('control-plane-client runtime behavior', () => {
 
     const [, options] = fetchMock.mock.calls[0]
     expect(options.headers.Authorization).toBeUndefined()
+  })
+
+  it('retries once with bearer token when cookie auth returns 401', async () => {
+    const storage = new Map()
+    globalThis.window = {
+      localStorage: {
+        getItem(key) {
+          return storage.get(String(key)) ?? null
+        },
+        setItem(key, value) {
+          storage.set(String(key), String(value))
+        },
+        removeItem(key) {
+          storage.delete(String(key))
+        },
+      },
+    }
+    setDashboardAccessToken('dsh_retry_token')
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({
+        error: { code: 'AUTH_REQUIRED', message: 'auth required' },
+      }, 401))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+
+    await controlPlaneClient.dashboard.getState({})
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [, firstOptions] = fetchMock.mock.calls[0]
+    const [, secondOptions] = fetchMock.mock.calls[1]
+    expect(firstOptions.headers.Authorization).toBeUndefined()
+    expect(secondOptions.headers.Authorization).toBe('Bearer dsh_retry_token')
   })
 
   it('supports quick-start verify with empty payload', async () => {

@@ -1,13 +1,11 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 
 import { controlPlaneClient } from '../api/control-plane-client'
 import { apiKeysState, clearRevealedSecret, createApiKey, hydrateApiKeys } from '../state/api-keys-state'
 import { authState, hydrateAuthSession, markOnboardingVerified } from '../state/auth-state'
 import { scopeState } from '../state/scope-state'
 
-const router = useRouter()
 const copyState = ref('')
 const keyLoading = ref(false)
 const keyError = ref('')
@@ -159,9 +157,6 @@ async function createFirstKey() {
     if (!result?.ok) {
       keyError.value = resolveCreateKeyError(result)
       logCreateKeyDiagnostics(result, 'final_failure')
-      if (result?.requiresLogin) {
-        await router.replace('/login?redirect=/onboarding')
-      }
       return
     }
     if (revealedSecret.value) {

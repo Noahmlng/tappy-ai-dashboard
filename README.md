@@ -70,6 +70,10 @@ Dashboard auth uses cookie sessions.
 - `dash_session`: HttpOnly + Secure + SameSite=Lax + Path=/
 - `dash_csrf`: Secure + SameSite=Lax
 - Browser write requests send `x-csrf-token` from `dash_csrf`
+- Client request strategy:
+  - Dashboard APIs use cookie + CSRF by default
+  - Runtime onboarding APIs require explicit `Authorization: Bearer <MEDIATION_API_KEY>`
+  - For legacy upstream compatibility, dashboard requests may retry once with stored bearer token only after 401/403
 
 ## Deploy (Vercel)
 
