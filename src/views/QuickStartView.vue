@@ -287,7 +287,7 @@ onMounted(() => {
           >
         </label>
       </div>
-      <p class="muted">The domain must resolve and CNAME to the platform runtime gateway.</p>
+      <p class="muted">The domain must resolve and pass TLS + runtime bid checks. CNAME to gateway is optional unless strict mode is enabled.</p>
       <p v-if="bindError" class="muted">{{ bindError }}</p>
 
       <div v-if="bindResult" class="verify-evidence">

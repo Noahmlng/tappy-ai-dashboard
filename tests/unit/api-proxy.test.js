@@ -428,6 +428,71 @@ describe('dashboardApiProxyHandler', () => {
     })
   })
 
+  it('allows direct runtime domain without gateway cname in default mode', async () => {
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['cname.vercel-dns.com']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
+        requestId: 'req_bid_probe_2',
+        message: 'Open https://ads.customer.example/direct',
+      })),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_direct',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'simple-chatbot-phi.vercel.app',
+      placementId: 'chat_from_answer_v1',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+
+    const payload = JSON.parse(verifyRes.body)
+    expect(payload.status).toBe('verified')
+    expect(payload.checks).toMatchObject({
+      dnsOk: true,
+      cnameOk: false,
+      tlsOk: true,
+      connectOk: true,
+      authOk: true,
+      bidOk: true,
+      landingUrlOk: true,
+    })
+  })
+
+  it('enforces gateway cname when strict mode is enabled', async () => {
+    process.env.MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME = '1'
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['31.13.85.34']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['cname.vercel-dns.com']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({ ok: true })),
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_strict',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'simple-chatbot-phi.vercel.app',
+    }
+
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+
+    expect(JSON.parse(verifyRes.body)).toMatchObject({
+      status: 'failed',
+      failureCode: 'CNAME_MISMATCH',
+    })
+  })
+
   it('returns structured failure when runtime domain DNS is not resolvable', async () => {
     setRuntimeDepsForTests({
       resolve4: vi.fn().mockResolvedValue([]),

@@ -239,9 +239,10 @@ function createRuntimeError(failureCode, message = '') {
   return error
 }
 
-async function resolveDnsWithCname(hostname, gatewayHost, deps) {
+async function resolveDnsWithCname(hostname, gatewayHost, deps, options = {}) {
   const normalizedHost = normalizeHost(hostname)
   const normalizedGatewayHost = normalizeHost(gatewayHost)
+  const requireGatewayCname = options?.requireGatewayCname === true
   const checks = {
     dnsOk: false,
     cnameOk: false,
@@ -266,10 +267,15 @@ async function resolveDnsWithCname(hostname, gatewayHost, deps) {
   checks.dnsOk = true
 
   const normalizedTargets = cnameTargets.map((item) => normalizeHost(item))
-  if (normalizedTargets.length === 0 || !normalizedTargets.includes(normalizedGatewayHost)) {
+  if (normalizedTargets.includes(normalizedGatewayHost)) {
+    checks.cnameOk = true
+    return checks
+  }
+
+  if (requireGatewayCname) {
     throw createRuntimeError('CNAME_MISMATCH', 'Domain is not pointing to runtime gateway.')
   }
-  checks.cnameOk = true
+  checks.cnameOk = false
   return checks
 }
 
@@ -749,6 +755,10 @@ function getRuntimeGatewayHost(env = process.env) {
   return normalizeHost(configured || DEFAULT_RUNTIME_GATEWAY_HOST)
 }
 
+function shouldRequireGatewayCname(env = process.env) {
+  return cleanText(env?.MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME) === '1'
+}
+
 async function handleRuntimeDomainVerifyAndBind(req, res) {
   const requestId = createRequestId('req_runtime_bind')
   const checks = createChecks()
@@ -788,6 +798,9 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
       normalizedDomain.hostname,
       getRuntimeGatewayHost(),
       deps,
+      {
+        requireGatewayCname: shouldRequireGatewayCname(),
+      },
     )
     checks.dnsOk = dnsChecks.dnsOk
     checks.cnameOk = dnsChecks.cnameOk

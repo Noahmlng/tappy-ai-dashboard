@@ -52,16 +52,19 @@ npm run build
   Default: `http://127.0.0.1:3100`
 - `MEDIATION_RUNTIME_GATEWAY_HOST` (optional)
   Default: `runtime-gateway.tappy.ai`
+- `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME` (optional)
+  Default: `0` (disabled). Set to `1` to enforce CNAME-to-gateway as a hard requirement.
 
 ## Onboarding Contract
 
 - SDK only requires `MEDIATION_API_KEY`.
 - Customer runtime domain must be verified and bound before onboarding is unlocked.
 - Verify-and-bind success requires:
-  - DNS resolvable + CNAME to runtime gateway
+  - DNS resolvable
   - TLS handshake success
   - Auth success on `POST /api/v2/bid`
   - Bid response includes a usable `landingUrl` (direct field or normalized from `url/link/message`)
+- If `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME=1`, verify-and-bind also requires CNAME to the configured runtime gateway.
 
 ## Auth Model
 
