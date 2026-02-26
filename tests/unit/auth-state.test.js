@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { controlPlaneClient, setDashboardAccessToken } from '../../src/api/control-plane-client'
 import {
   authState,
+  isOnboardingUnlocked,
   isOnboardingVerified,
   loginDashboardUser,
   registerDashboardUser,
@@ -63,6 +64,25 @@ describe('auth-state onboarding behavior', () => {
     expect(authState.onboarding.status).toBe('verified')
     expect(authState.onboarding.verifiedAt).toBe('2026-02-26T10:00:00.000Z')
     expect(isOnboardingVerified()).toBe(true)
+    expect(isOnboardingUnlocked()).toBe(true)
+  })
+
+  it('login marks onboarding pending as unlocked but not verified', async () => {
+    vi.spyOn(controlPlaneClient.auth, 'login').mockResolvedValue({
+      user: { email: 'pending@example.com', accountId: 'org_p', appId: '' },
+      session: { id: 'sess_pending' },
+      scope: { accountId: 'org_p', appId: '' },
+      onboarding: { status: 'pending' },
+    })
+
+    await loginDashboardUser({
+      email: 'pending@example.com',
+      password: 'password-123',
+    })
+
+    expect(authState.onboarding.status).toBe('pending')
+    expect(isOnboardingUnlocked()).toBe(true)
+    expect(isOnboardingVerified()).toBe(false)
   })
 
   it('infers verified onboarding for legacy payloads with account+app scope', async () => {

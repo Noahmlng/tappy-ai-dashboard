@@ -24,6 +24,7 @@ The SPA always calls same-origin `/api/*`.
 - For Vercel/production, `/api/*` is handled by `api/[...path].js` and forwarded to `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
 - Runtime onboarding now uses:
   - `POST /api/v1/public/runtime-domain/verify-and-bind`
+  - `POST /api/v1/public/runtime-domain/probe`
   - `GET /api/v1/public/sdk/bootstrap`
   - `POST /api/v2/bid` (normalized to include `landingUrl`)
 
@@ -58,12 +59,11 @@ npm run build
 ## Onboarding Contract
 
 - SDK only requires `MEDIATION_API_KEY`.
-- Customer runtime domain must be verified and bound before onboarding is unlocked.
-- Verify-and-bind success requires:
-  - DNS resolvable
-  - TLS handshake success
-  - Auth success on `POST /api/v2/bid`
-  - Bid response includes a usable `landingUrl` (direct field or normalized from `url/link/message`)
+- `verify-and-bind` now returns `status: verified | pending | failed`.
+- `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
+- Dashboard navigation unlocks for both `pending` and `verified`, while a top warning banner remains for `pending`.
+- Onboarding is considered complete only when `status=verified`.
+- Runtime probe uses granular codes (for example `EGRESS_BLOCKED`, `ENDPOINT_404`, `AUTH_401_403`, `LANDING_URL_MISSING`) and returns actionable `nextActions`.
 - If `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME=1`, verify-and-bind also requires CNAME to the configured runtime gateway.
 
 ## Auth Model

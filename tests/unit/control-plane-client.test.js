@@ -144,6 +144,34 @@ describe('control-plane-client runtime behavior', () => {
     expect(options.body).toBe('{\"domain\":\"runtime.customer-example.org\"}')
   })
 
+  it('supports runtime-domain probe with explicit runtime api key header', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({
+        status: 'pending',
+        finalStatus: 'pending',
+        requestId: 'req_probe_1',
+      }))
+
+    await controlPlaneClient.runtimeDomain.probe({
+      domain: 'https://runtime.customer-example.org',
+      runBrowserProbe: true,
+      browserProbe: {
+        ok: true,
+        code: 'VERIFIED',
+      },
+    }, {
+      apiKey: 'sk_runtime_secret',
+    })
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/public/runtime-domain/probe')
+    expect(options.method).toBe('POST')
+    expect(options.headers.Authorization).toBe('Bearer sk_runtime_secret')
+    expect(options.headers['x-csrf-token']).toBeUndefined()
+    expect(options.body).toContain('\"runBrowserProbe\":true')
+  })
+
   it('supports sdk bootstrap with explicit runtime api key header', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

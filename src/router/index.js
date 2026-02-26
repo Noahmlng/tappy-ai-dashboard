@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import { authState, hydrateAuthSession, isOnboardingVerified } from '../state/auth-state'
+import { authState, hydrateAuthSession, isOnboardingUnlocked } from '../state/auth-state'
 import ApiKeysView from '../views/ApiKeysView.vue'
 import DecisionLogsView from '../views/DecisionLogsView.vue'
 import HomeView from '../views/HomeView.vue'
@@ -89,10 +89,10 @@ router.beforeEach(async (to) => {
 
   const isPublic = Boolean(to.meta?.publicRoute)
   const requiresAuth = Boolean(to.meta?.requiresAuth)
-  const onboardingVerified = isOnboardingVerified()
+  const onboardingUnlocked = isOnboardingUnlocked()
 
   if (isPublic && authState.authenticated) {
-    return onboardingVerified ? '/home' : '/onboarding'
+    return onboardingUnlocked ? '/home' : '/onboarding'
   }
   if (requiresAuth && !authState.authenticated) {
     const redirectTarget = String(to.fullPath || '/home')
@@ -104,7 +104,7 @@ router.beforeEach(async (to) => {
   if (
     requiresAuth
     && authState.authenticated
-    && !onboardingVerified
+    && !onboardingUnlocked
     && !PRE_VERIFY_ALLOWED_ROUTES.has(String(to.name || ''))
   ) {
     return '/onboarding'

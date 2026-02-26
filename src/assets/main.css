@@ -1031,6 +1031,16 @@ textarea:focus-visible {
   gap: var(--space-12);
 }
 
+.runtime-warning-banner {
+  border-color: #e8c96d;
+  background: #fff9e8;
+  margin-bottom: var(--space-16);
+}
+
+.runtime-warning-banner .panel-toolbar {
+  align-items: center;
+}
+
 .verify-disclosure {
   border-top: 1px dashed var(--line-soft);
   padding-top: var(--space-12);

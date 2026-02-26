@@ -242,6 +242,7 @@ test.describe('dashboard smoke flow', () => {
         onboardingVerifiedAt = '2026-02-26T12:00:00.000Z'
         await json(200, {
           status: 'verified',
+          bindStage: 'bound',
           requestId: 'req_bind_1',
           verifiedAt: onboardingVerifiedAt,
           runtimeBaseUrl: `https://${runtimeDomain}`,
@@ -255,6 +256,31 @@ test.describe('dashboard smoke flow', () => {
             bidOk: true,
             landingUrlOk: true,
           },
+        })
+        return
+      }
+
+      if (pathname === '/api/v1/public/runtime-domain/probe' && method === 'POST') {
+        onboardingStatus = 'verified'
+        onboardingVerifiedAt = '2026-02-26T12:00:00.000Z'
+        await json(200, {
+          status: 'verified',
+          finalStatus: 'verified',
+          requestId: 'req_probe_1',
+          runtimeBaseUrl: 'https://runtime.customer-example.org',
+          probeResult: {
+            source: 'server',
+            ok: true,
+            code: 'VERIFIED',
+            detail: 'Runtime bid probe succeeded.',
+          },
+          serverProbe: {
+            source: 'server',
+            ok: true,
+            code: 'VERIFIED',
+            detail: 'Runtime bid probe succeeded.',
+          },
+          nextActions: [],
         })
         return
       }
@@ -328,8 +354,8 @@ test.describe('dashboard smoke flow', () => {
 
     await page.getByLabel('Runtime domain').fill('runtime.customer-example.org')
     await page.getByLabel('Runtime API key').fill('sk_live_new_secret')
-    await page.getByRole('button', { name: 'Verify and bind' }).click()
-    await expect(page.getByText('status:')).toBeVisible()
+    await page.getByRole('button', { name: 'Bind domain' }).click()
+    await expect(page.getByText('bindState:')).toBeVisible()
     await expect(page.locator('.meta-pill.good')).toHaveText('Verified')
 
     await expect(page.locator('aside .nav-link[href="/usage"]')).toHaveCount(1)

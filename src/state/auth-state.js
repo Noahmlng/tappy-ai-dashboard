@@ -6,7 +6,9 @@ import { setScope } from './scope-state'
 function normalizeOnboarding(source = {}) {
   const status = String(source?.status || '').trim().toLowerCase()
   return {
-    status: status === 'verified' ? 'verified' : 'locked',
+    status: status === 'verified'
+      ? 'verified'
+      : (status === 'pending' ? 'pending' : 'locked'),
     verifiedAt: String(source?.verifiedAt || source?.verified_at || '').trim(),
   }
 }
@@ -21,7 +23,7 @@ function pickScopeValue(...values) {
 
 function resolveOnboarding(payload = {}, user = {}, scope = {}) {
   const explicit = normalizeOnboarding(payload?.onboarding || {})
-  if (explicit.status === 'verified') return explicit
+  if (explicit.status === 'verified' || explicit.status === 'pending') return explicit
 
   const accountId = pickScopeValue(
     scope?.accountId,
@@ -138,9 +140,18 @@ export function isOnboardingVerified() {
   return authState.onboarding.status === 'verified'
 }
 
+export function isOnboardingUnlocked() {
+  const status = String(authState.onboarding.status || '').trim().toLowerCase()
+  return status === 'verified' || status === 'pending'
+}
+
 export function markOnboardingVerified(verifiedAt = '') {
   authState.onboarding.status = 'verified'
   authState.onboarding.verifiedAt = String(verifiedAt || '').trim() || new Date().toISOString()
+}
+
+export function markOnboardingPending() {
+  authState.onboarding.status = 'pending'
 }
 
 export async function hydrateAuthSession() {

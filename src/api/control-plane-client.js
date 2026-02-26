@@ -244,6 +244,15 @@ const rawControlPlaneClient = {
         body: payload,
       })
     },
+    probe(payload = {}, options = {}) {
+      const runtimeApiKey = cleanText(options?.apiKey)
+      return requestJson('/v1/public/runtime-domain/probe', {
+        method: 'POST',
+        authMode: 'bearer',
+        bearerToken: runtimeApiKey,
+        body: payload,
+      })
+    },
   },
   sdk: {
     bootstrap(options = {}) {
@@ -367,6 +376,9 @@ export const controlPlaneClient = {
   runtimeDomain: {
     verifyAndBind(payload, options) {
       return withControlPlaneCall(() => rawControlPlaneClient.runtimeDomain.verifyAndBind(payload || {}, options || {}))
+    },
+    probe(payload, options) {
+      return withControlPlaneCall(() => rawControlPlaneClient.runtimeDomain.probe(payload || {}, options || {}))
     },
   },
   sdk: {
