@@ -1,8 +1,3 @@
-import { createHash } from 'node:crypto'
-import { resolve4 as dnsResolve4, resolve6 as dnsResolve6, resolveCname as dnsResolveCname } from 'node:dns/promises'
-import net from 'node:net'
-import tls from 'node:tls'
-
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -15,6 +10,7 @@ const HOP_BY_HOP_HEADERS = new Set([
   'host',
   'content-length',
 ])
+
 const RESPONSE_HEADERS_TO_STRIP = new Set([
   ...HOP_BY_HOP_HEADERS,
   'content-encoding',
@@ -35,15 +31,8 @@ const UPSTREAM_TIMEOUT_MS = 10_000
 const DEFAULT_ENVIRONMENT = 'prod'
 const DEFAULT_PLACEMENT_ID = 'chat_from_answer_v1'
 const DEFAULT_KEY_NAME = 'runtime-prod'
-const DEFAULT_RUNTIME_GATEWAY_HOST = 'runtime-gateway.tappy.ai'
-const RUNTIME_VERIFY_TIMEOUT_MS = 8_000
-const RUNTIME_BINDING_STORE_TIMEOUT_MS = 2_500
-const RUNTIME_BINDING_CACHE_TTL_MS = 30_000
 const URL_IN_TEXT_RE = /(https?:\/\/[^\s"'<>]+)/i
-const PROBE_HEADERS_MAX_KEYS = 2
-const PROBE_HEADERS_MAX_BYTES = 2_048
-const DEFAULT_BIND_STATUS = 'pending'
-const UNBOUND_BIND_STATUS = 'unbound'
+
 const REMOVED_RUNTIME_ROUTES = Object.freeze({
   '/api/v1/public/sdk/bootstrap': {
     method: 'GET',
@@ -67,19 +56,11 @@ const REMOVED_RUNTIME_ROUTES = Object.freeze({
   },
 })
 
-const runtimeDomainBindings = new Map()
-const runtimeBindingCache = new Map()
 let runtimeDepsOverride = null
 
 function defaultRuntimeDeps() {
   return {
-    resolve4: dnsResolve4,
-    resolve6: dnsResolve6,
-    resolveCname: dnsResolveCname,
-    tlsConnect: tls.connect.bind(tls),
     fetch: globalThis.fetch.bind(globalThis),
-    now: () => Date.now(),
-    random: () => Math.random(),
   }
 }
 
@@ -97,194 +78,34 @@ export function setRuntimeDepsForTests(overrides = null) {
 }
 
 export function clearRuntimeDomainBindingsForTests() {
-  runtimeDomainBindings.clear()
-  runtimeBindingCache.clear()
+  // No-op: runtime binding flow has been removed from dashboard proxy.
 }
 
-function isAllowedProbeHeader(headerName) {
-  const normalized = normalizeHost(headerName)
-  if (!normalized) return false
-  if (HOP_BY_HOP_HEADERS.has(normalized)) return false
-  if (normalized === 'content-length') return false
-  if (normalized === 'host') return false
-  return normalized === 'authorization'
-    || normalized.startsWith('x-')
-    || normalized.startsWith('cf-')
+function cleanText(value) {
+  return String(value || '').trim()
 }
 
-function sanitizeProbeHeaders(source = {}) {
-  const input = source && typeof source === 'object' && !Array.isArray(source)
-    ? source
-    : {}
-  const entries = []
-  let bytes = 0
-
-  for (const [rawKey, rawValue] of Object.entries(input)) {
-    const key = cleanText(rawKey).toLowerCase()
-    if (!key) continue
-
-    if (!isAllowedProbeHeader(key)) {
-      throw createRuntimeError('PROBE_HEADERS_INVALID', `Probe header "${key}" is not allowed.`)
-    }
-
-    const value = cleanText(rawValue)
-    if (!value) continue
-    bytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(value, 'utf8')
-    entries.push([key, value])
+function pickFirstText(...values) {
+  for (const value of values) {
+    const normalized = cleanText(value)
+    if (normalized) return normalized
   }
-
-  if (entries.length > PROBE_HEADERS_MAX_KEYS) {
-    throw createRuntimeError('PROBE_HEADERS_INVALID', `Only ${PROBE_HEADERS_MAX_KEYS} probe headers are allowed.`)
-  }
-  if (bytes > PROBE_HEADERS_MAX_BYTES) {
-    throw createRuntimeError('PROBE_HEADERS_INVALID', 'Probe headers exceed size limit.')
-  }
-
-  return Object.fromEntries(entries)
-}
-
-function encodeProbeHeaders(headers = {}) {
-  const payload = JSON.stringify(headers || {})
-  return Buffer.from(payload, 'utf8').toString('base64')
-}
-
-function decodeProbeHeaders(encodedValue = '') {
-  const encoded = cleanText(encodedValue)
-  if (!encoded) return {}
-  try {
-    const raw = Buffer.from(encoded, 'base64').toString('utf8')
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed
-      : {}
-  } catch {
-    return {}
-  }
-}
-
-function makeLegacyProbeCode(code = '') {
-  const normalized = cleanText(code).toUpperCase()
-  if (!normalized) return ''
-  if (normalized === 'AUTH_401_403') return 'AUTH_FORBIDDEN'
-  if (['BID_INVALID_RESPONSE_JSON', 'LANDING_URL_MISSING'].includes(normalized)) {
-    return 'BID_INVALID_RESPONSE'
-  }
-  if ([
-    'EGRESS_BLOCKED',
-    'ENDPOINT_404',
-    'METHOD_405',
-    'CORS_BLOCKED',
-    'UPSTREAM_5XX',
-  ].includes(normalized)) {
-    return 'NETWORK_BLOCKED'
-  }
-  return normalized
-}
-
-function buildNextActions(code = '') {
-  const normalized = cleanText(code).toUpperCase()
-  switch (normalized) {
-    case 'ENDPOINT_404':
-      return [
-        'Ensure runtime domain exposes POST /api/v2/bid.',
-        'Confirm deployment routes include /api/v2/bid.',
-      ]
-    case 'METHOD_405':
-      return [
-        'Allow POST method on /api/v2/bid.',
-        'Verify platform middleware does not block non-GET requests.',
-      ]
-    case 'AUTH_401_403':
-      return [
-        'Verify Runtime API key is active and has bid permission.',
-        'Check Authorization header format: Bearer <MEDIATION_API_KEY>.',
-      ]
-    case 'UPSTREAM_5XX':
-      return [
-        'Inspect runtime server logs for /api/v2/bid failures.',
-        'Retry probe after runtime service health returns to normal.',
-      ]
-    case 'BID_INVALID_RESPONSE_JSON':
-      return [
-        'Return valid JSON body from /api/v2/bid.',
-        'Set response Content-Type to application/json.',
-      ]
-    case 'LANDING_URL_MISSING':
-      return [
-        'Include landingUrl in /api/v2/bid response.',
-        'Or provide url/link so control plane can normalize it.',
-      ]
-    case 'EGRESS_BLOCKED':
-      return [
-        'Run Browser Probe to verify user-side reachability.',
-        'If Browser Probe passes, allow-list control-plane egress IPs or relax edge protection.',
-      ]
-    case 'CORS_BLOCKED':
-      return [
-        'Allow dashboard origin in Access-Control-Allow-Origin for browser probe requests.',
-        'Or skip browser probe and rely on server probe diagnostics for production runtime checks.',
-      ]
-    case 'PROBE_HEADERS_INVALID':
-      return [
-        'Use up to 2 probe headers with allowed prefixes (x- or cf- or authorization).',
-        'Remove host/content-length/connection related headers.',
-      ]
-    default:
-      return [
-        'Retry probe and inspect runtime logs.',
-        'Confirm /api/v2/bid accepts POST and returns a usable landing URL.',
-      ]
-  }
-}
-
-function createProbeResult(source, input = {}) {
-  return {
-    source: cleanText(source) || 'server',
-    ok: Boolean(input.ok),
-    code: cleanText(input.code) || 'EGRESS_BLOCKED',
-    httpStatus: Number(input.httpStatus || 0) || undefined,
-    detail: cleanText(input.detail),
-    landingUrl: cleanText(input.landingUrl),
-  }
-}
-
-function classifyHttpProbeError(statusCode) {
-  const status = Number(statusCode || 0)
-  if (status === 404) return 'ENDPOINT_404'
-  if (status === 405) return 'METHOD_405'
-  if (status === 401 || status === 403) return 'AUTH_401_403'
-  if (status >= 500) return 'UPSTREAM_5XX'
-  return 'EGRESS_BLOCKED'
-}
-
-function normalizeBrowserProbePayload(input = {}) {
-  const source = input && typeof input === 'object' && !Array.isArray(input)
-    ? input
-    : {}
-  return createProbeResult('browser', {
-    ok: source.ok === true,
-    code: cleanText(source.code) || 'EGRESS_BLOCKED',
-    httpStatus: Number(source.httpStatus || 0) || 0,
-    detail: cleanText(source.detail),
-    landingUrl: cleanText(source.landingUrl),
-  })
+  return ''
 }
 
 function normalizeHost(value) {
-  return String(value || '')
-    .trim()
+  return cleanText(value)
     .toLowerCase()
-    .replace(/\.$/, '')
+    .replace(/^\[(.*)\]$/, '$1')
 }
 
 function isPrivateIpv4(value) {
-  const parts = String(value || '')
-    .split('.')
-    .map((item) => Number.parseInt(item, 10))
-  if (parts.length !== 4 || parts.some((item) => Number.isNaN(item))) return false
-
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return false
+  const parts = value.split('.').map((part) => Number(part))
+  if (parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false
   if (parts[0] === 10) return true
   if (parts[0] === 127) return true
+  if (parts[0] === 0) return true
   if (parts[0] === 169 && parts[1] === 254) return true
   if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
   if (parts[0] === 192 && parts[1] === 168) return true
@@ -292,803 +113,99 @@ function isPrivateIpv4(value) {
 }
 
 function isPrivateIpv6(value) {
-  const normalized = String(value || '').toLowerCase()
-  return normalized === '::1'
-    || normalized.startsWith('fc')
-    || normalized.startsWith('fd')
-    || normalized.startsWith('fe80:')
+  const normalized = normalizeHost(value)
+  if (!normalized.includes(':')) return false
+  if (normalized === '::1') return true
+  if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true
+  if (normalized.startsWith('fe80')) return true
+  return false
 }
 
 function isPrivateOrLoopbackHost(hostname) {
   const normalized = normalizeHost(hostname)
-  const ipVersion = net.isIP(normalized)
-  if (ipVersion === 4) return isPrivateIpv4(normalized)
-  if (ipVersion === 6) return isPrivateIpv6(normalized)
-  return normalized === 'localhost'
-    || normalized.endsWith('.localhost')
-    || normalized.endsWith('.local')
+  if (!normalized) return true
+  if (normalized === 'localhost') return true
+  if (isPrivateIpv4(normalized)) return true
+  if (isPrivateIpv6(normalized)) return true
+  return false
 }
 
 function isReservedDomain(hostname) {
   const normalized = normalizeHost(hostname)
-  if (!normalized) return true
-  if (normalized === 'example.com') return true
-  if (normalized.endsWith('.example.com')) return true
-  return false
+  return normalized.endsWith('.local')
+    || normalized.endsWith('.internal')
+    || normalized.endsWith('.localhost')
 }
 
 export function normalizeRuntimeDomain(rawValue) {
-  const input = cleanText(rawValue)
-  if (!input) return { ok: false, failureCode: 'CNAME_MISMATCH' }
-
-  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input) ? input : `https://${input}`
+  const original = cleanText(rawValue)
+  if (!original) {
+    return { ok: false, failureCode: 'RUNTIME_DOMAIN_REQUIRED', message: 'Runtime domain is required.' }
+  }
   let parsed
   try {
-    parsed = new URL(candidate)
+    parsed = new URL(original.startsWith('http') ? original : `https://${original}`)
   } catch {
-    return { ok: false, failureCode: 'CNAME_MISMATCH' }
+    return { ok: false, failureCode: 'RUNTIME_DOMAIN_INVALID', message: 'Runtime domain is invalid.' }
   }
-
-  const protocol = String(parsed.protocol || '').toLowerCase()
+  if (!['https:'].includes(parsed.protocol)) {
+    return { ok: false, failureCode: 'RUNTIME_DOMAIN_INVALID', message: 'Runtime domain must use HTTPS.' }
+  }
   const hostname = normalizeHost(parsed.hostname)
-  if (!['http:', 'https:'].includes(protocol) || !hostname) {
-    return { ok: false, failureCode: 'CNAME_MISMATCH' }
-  }
-  if (isReservedDomain(hostname) || isPrivateOrLoopbackHost(hostname)) {
-    return { ok: false, failureCode: 'CNAME_MISMATCH' }
+  if (!hostname || isPrivateOrLoopbackHost(hostname) || isReservedDomain(hostname)) {
+    return { ok: false, failureCode: 'RUNTIME_DOMAIN_INVALID', message: 'Runtime domain is not allowed.' }
   }
 
+  parsed.pathname = ''
+  parsed.search = ''
+  parsed.hash = ''
   return {
     ok: true,
     hostname,
-    runtimeBaseUrl: `https://${hostname}`,
+    runtimeBaseUrl: parsed.toString().replace(/\/$/, ''),
   }
-}
-
-function createRequestId(prefix = 'req') {
-  const random = Math.floor((1 + Math.random()) * 1_000_000).toString(36)
-  return `${prefix}_${Date.now().toString(36)}_${random}`
-}
-
-function readHeaderValue(headers = {}, key) {
-  const target = String(key || '').toLowerCase()
-  for (const [headerKey, value] of Object.entries(headers || {})) {
-    if (String(headerKey || '').toLowerCase() === target) {
-      return Array.isArray(value) ? String(value[0] || '') : String(value || '')
-    }
-  }
-  return ''
-}
-
-function normalizeAuthorization(rawValue) {
-  return cleanText(rawValue)
-}
-
-function makeTenantId(authorization, deps) {
-  const digest = createHash('sha256')
-    .update(cleanText(authorization))
-    .digest('hex')
-    .slice(0, 12)
-  const now = Number(deps?.now?.() || Date.now()).toString(36).slice(-4)
-  return `tenant_${digest}_${now}`
-}
-
-function makeStableTenantId(authorization = '') {
-  const digest = createHash('sha256')
-    .update(cleanText(authorization))
-    .digest('hex')
-    .slice(0, 12)
-  return digest ? `tenant_${digest}` : ''
 }
 
 function extractFirstUrl(value) {
   const input = cleanText(value)
   if (!input) return ''
-  const matched = input.match(URL_IN_TEXT_RE)
-  return matched ? cleanText(matched[1]) : ''
+  const match = input.match(URL_IN_TEXT_RE)
+  return cleanText(match?.[1] || input)
 }
 
 function pickLandingUrl(source = {}) {
-  const payload = source && typeof source === 'object' ? source : {}
-  const ad = payload.ad && typeof payload.ad === 'object' ? payload.ad : {}
-
   return pickFirstText(
-    payload.landingUrl,
-    payload.url,
-    payload.link,
-    ad.landingUrl,
-    ad.url,
-    ad.link,
-    extractFirstUrl(payload.message),
-    extractFirstUrl(ad.message),
+    source.landingUrl,
+    source.url,
+    source.link,
+    source.redirectUrl,
+    source.targetUrl,
+    source.clickUrl,
+    source.destinationUrl,
+    source?.bid?.landingUrl,
+    source?.bid?.url,
+    source?.bid?.link,
+    source?.data?.landingUrl,
+    source?.data?.url,
+    source?.data?.link,
+    extractFirstUrl(source.reasonMessage),
+    extractFirstUrl(source.message),
   )
 }
 
 export function normalizeBidPayload(source = {}) {
-  const payload = source && typeof source === 'object' ? source : {}
+  const payload = source && typeof source === 'object' ? { ...source } : {}
   const landingUrl = pickLandingUrl(payload)
-  const ad = payload.ad && typeof payload.ad === 'object'
-    ? {
-      ...payload.ad,
-      landingUrl: pickFirstText(
-        payload.ad.landingUrl,
-        payload.ad.url,
-        payload.ad.link,
-        landingUrl,
-      ),
-    }
-    : payload.ad
-
-  const next = {
-    ...payload,
-    ad,
-  }
   if (landingUrl) {
-    next.landingUrl = landingUrl
+    payload.landingUrl = landingUrl
+  }
+  if (!cleanText(payload.requestId)) {
+    payload.requestId = pickFirstText(payload.traceId, payload?.bid?.requestId)
   }
   return {
-    payload: next,
-    landingUrl,
-  }
-}
-
-function createChecks() {
-  return {
-    dnsOk: false,
-    cnameOk: false,
-    tlsOk: false,
-    connectOk: false,
-    authOk: false,
-    bidOk: false,
-    landingUrlOk: false,
-  }
-}
-
-function createRuntimeError(failureCode, message = '', details = {}) {
-  const error = new Error(message || failureCode)
-  error.failureCode = failureCode
-  if (details && typeof details === 'object') {
-    Object.assign(error, details)
-  }
-  return error
-}
-
-async function resolveDnsWithCname(hostname, gatewayHost, deps, options = {}) {
-  const normalizedHost = normalizeHost(hostname)
-  const normalizedGatewayHost = normalizeHost(gatewayHost)
-  const requireGatewayCname = options?.requireGatewayCname === true
-  const checks = {
-    dnsOk: false,
-    cnameOk: false,
-  }
-
-  const [ipv4, ipv6] = await Promise.all([
-    deps.resolve4(normalizedHost).catch(() => []),
-    deps.resolve6(normalizedHost).catch(() => []),
-  ])
-  const hasAddress = (Array.isArray(ipv4) && ipv4.length > 0) || (Array.isArray(ipv6) && ipv6.length > 0)
-
-  let cnameTargets = []
-  try {
-    cnameTargets = await deps.resolveCname(normalizedHost)
-  } catch {
-    cnameTargets = []
-  }
-
-  if (!hasAddress && cnameTargets.length === 0) {
-    throw createRuntimeError('DNS_ENOTFOUND', 'Domain is not resolvable.')
-  }
-  checks.dnsOk = true
-
-  const normalizedTargets = cnameTargets.map((item) => normalizeHost(item))
-  if (normalizedTargets.includes(normalizedGatewayHost)) {
-    checks.cnameOk = true
-    return checks
-  }
-
-  if (requireGatewayCname) {
-    throw createRuntimeError('CNAME_MISMATCH', 'Domain is not pointing to runtime gateway.')
-  }
-  checks.cnameOk = false
-  return checks
-}
-
-async function verifyTls(hostname, deps) {
-  const checks = {
-    tlsOk: false,
-    connectOk: false,
-  }
-  await new Promise((resolve, reject) => {
-    const socket = deps.tlsConnect({
-      host: hostname,
-      port: 443,
-      servername: hostname,
-      rejectUnauthorized: true,
-    })
-    const timer = setTimeout(() => {
-      socket.destroy()
-      reject(createRuntimeError('TLS_INVALID', 'TLS handshake timed out.'))
-    }, RUNTIME_VERIFY_TIMEOUT_MS)
-
-    socket.on('secureConnect', () => {
-      clearTimeout(timer)
-      socket.end()
-      resolve(true)
-    })
-    socket.on('error', () => {
-      clearTimeout(timer)
-      reject(createRuntimeError('TLS_INVALID', 'TLS handshake failed.'))
-    })
-  })
-  checks.tlsOk = true
-  checks.connectOk = true
-  return checks
-}
-
-function createBidProbePayload(placementId) {
-  return {
-    userId: 'probe_user',
-    chatId: 'probe_chat',
-    placementId: cleanText(placementId) || DEFAULT_PLACEMENT_ID,
-    messages: [
-      { role: 'user', content: 'probe message' },
-      { role: 'assistant', content: 'probe context' },
-    ],
-  }
-}
-
-async function readJsonResponse(response) {
-  const contentType = cleanText(response?.headers?.get('content-type')).toLowerCase()
-  if (contentType.includes('application/json')) {
-    return response.json().catch(() => null)
-  }
-  const rawText = await response.text().catch(() => '')
-  if (!rawText) return null
-  try {
-    return JSON.parse(rawText)
-  } catch {
-    return null
-  }
-}
-
-async function probeBid(runtimeBaseUrl, placementId, authorization, deps, options = {}) {
-  const probeHeaders = sanitizeProbeHeaders(options.probeHeaders || {})
-  const outboundHeaders = {
-    ...probeHeaders,
-    authorization,
-    'content-type': 'application/json; charset=utf-8',
-  }
-  const probeResponse = await deps.fetch(`${runtimeBaseUrl}/api/v2/bid`, {
-    method: 'POST',
-    headers: outboundHeaders,
-    body: JSON.stringify(createBidProbePayload(placementId)),
-  }).catch((error) => {
-    if (error?.failureCode) throw error
-    throw createRuntimeError('EGRESS_BLOCKED', 'Runtime bid probe failed.', {
-      detail: error instanceof Error ? error.message : 'Network failure',
-      legacyCode: 'NETWORK_BLOCKED',
-    })
-  })
-
-  if (!probeResponse) {
-    throw createRuntimeError('EGRESS_BLOCKED', 'Runtime bid probe failed.', {
-      legacyCode: 'NETWORK_BLOCKED',
-    })
-  }
-
-  if (!probeResponse.ok) {
-    const code = classifyHttpProbeError(probeResponse.status)
-    throw createRuntimeError(code, `Runtime bid probe failed with status ${probeResponse.status}.`, {
-      httpStatus: Number(probeResponse.status || 0),
-      legacyCode: makeLegacyProbeCode(code),
-    })
-  }
-
-  const parsed = await readJsonResponse(probeResponse)
-  if (!parsed || typeof parsed !== 'object') {
-    throw createRuntimeError('BID_INVALID_RESPONSE_JSON', 'Runtime bid response is not JSON.', {
-      httpStatus: Number(probeResponse.status || 0),
-      legacyCode: 'BID_INVALID_RESPONSE',
-    })
-  }
-
-  const { landingUrl, payload } = normalizeBidPayload(parsed)
-  if (!landingUrl) {
-    throw createRuntimeError('LANDING_URL_MISSING', 'Runtime bid response does not contain landingUrl.', {
-      httpStatus: Number(probeResponse.status || 0),
-      legacyCode: 'BID_INVALID_RESPONSE',
-    })
-  }
-
-  return createProbeResult('server', {
-    ok: true,
-    code: 'VERIFIED',
-    httpStatus: Number(probeResponse.status || 200),
-    detail: 'Runtime bid probe succeeded.',
-    landingUrl,
     payload,
-  })
-}
-
-function toProbeFailureResult(error, source = 'server') {
-  const code = cleanText(error?.failureCode || '').toUpperCase() || 'EGRESS_BLOCKED'
-  return createProbeResult(source, {
-    ok: false,
-    code,
-    httpStatus: Number(error?.httpStatus || 0),
-    detail: cleanText(error?.message || error?.detail || 'Probe failed'),
-  })
-}
-
-function withProbeCompatibility(payload = {}) {
-  const probeCode = cleanText(payload?.failureCode || payload?.probeResult?.code || '')
-  const legacyCode = cleanText(payload?.legacyCode || makeLegacyProbeCode(probeCode))
-  if (!legacyCode || legacyCode === probeCode) {
-    return payload
+    landingUrl: cleanText(payload.landingUrl),
   }
-  return {
-    ...payload,
-    legacyCode,
-  }
-}
-
-function computeProbeFinalStatus(serverProbe, browserProbe) {
-  const serverOk = Boolean(serverProbe?.ok)
-  const browserOk = Boolean(browserProbe?.ok)
-
-  if (serverOk) {
-    return {
-      status: 'verified',
-      code: 'VERIFIED',
-      source: 'server',
-    }
-  }
-  if (!serverOk && browserOk) {
-    return {
-      status: 'pending',
-      code: 'EGRESS_BLOCKED',
-      source: 'server',
-    }
-  }
-  return {
-    status: 'pending',
-    code: cleanText(serverProbe?.code || 'EGRESS_BLOCKED'),
-    source: 'server',
-  }
-}
-
-function makeBindingSnapshot(existing = {}, patch = {}) {
-  const nowIso = new Date().toISOString()
-  const keyHash = cleanText(patch.keyHash || existing.keyHash)
-  return {
-    keyHash,
-    tenantId: cleanText(patch.tenantId || existing.tenantId),
-    runtimeBaseUrl: cleanText(patch.runtimeBaseUrl || existing.runtimeBaseUrl),
-    managedRuntimeBaseUrl: cleanText(patch.managedRuntimeBaseUrl || existing.managedRuntimeBaseUrl),
-    customerRuntimeBaseUrl: cleanText(patch.customerRuntimeBaseUrl || existing.customerRuntimeBaseUrl),
-    runtimeSourceHint: cleanText(patch.runtimeSourceHint || existing.runtimeSourceHint),
-    placementId: cleanText(patch.placementId || existing.placementId || DEFAULT_PLACEMENT_ID),
-    keyScope: 'tenant',
-    bindStatus: normalizeBindStatus(patch.bindStatus || existing.bindStatus || DEFAULT_BIND_STATUS),
-    verifiedAt: cleanText(patch.verifiedAt ?? existing.verifiedAt),
-    lastProbeAt: cleanText(patch.lastProbeAt ?? existing.lastProbeAt),
-    lastProbeCode: cleanText(patch.lastProbeCode ?? existing.lastProbeCode),
-    lastProbeHttpStatus: Number(patch.lastProbeHttpStatus ?? existing.lastProbeHttpStatus ?? 0) || 0,
-    probeHeadersEncrypted: cleanText(patch.probeHeadersEncrypted ?? existing.probeHeadersEncrypted),
-    probeDiagnostics: patch.probeDiagnostics || existing.probeDiagnostics || null,
-    createdAt: cleanText(existing.createdAt || patch.createdAt || nowIso),
-    updatedAt: cleanText(patch.updatedAt || nowIso),
-  }
-}
-
-function projectBindingForResponse(binding = {}) {
-  return {
-    tenantId: binding.tenantId,
-    keyScope: binding.keyScope || 'tenant',
-    runtimeBaseUrl: binding.runtimeBaseUrl,
-    bindStatus: normalizeBindStatus(binding.bindStatus || DEFAULT_BIND_STATUS),
-    placementDefaults: {
-      placementId: binding.placementId || DEFAULT_PLACEMENT_ID,
-    },
-  }
-}
-
-function normalizeBindStatus(status) {
-  const normalized = cleanText(status).toLowerCase()
-  if (normalized === 'verified') return 'verified'
-  if (normalized === 'pending') return 'pending'
-  if (normalized === 'failed') return 'failed'
-  if (normalized === UNBOUND_BIND_STATUS) return UNBOUND_BIND_STATUS
-  return DEFAULT_BIND_STATUS
-}
-
-function hashRuntimeApiKey(authorization = '') {
-  const token = cleanText(authorization).replace(/^bearer\s+/i, '')
-  if (!token) return ''
-  return createHash('sha256').update(token).digest('hex')
-}
-
-function getBindingCacheKey(authorization = '') {
-  return normalizeAuthorization(authorization)
-}
-
-function readRuntimeBindingCache(authorization = '') {
-  const cacheKey = getBindingCacheKey(authorization)
-  if (!cacheKey) return undefined
-  const cacheEntry = runtimeBindingCache.get(cacheKey)
-  if (!cacheEntry) return undefined
-  if (cacheEntry.expiresAt <= Date.now()) {
-    runtimeBindingCache.delete(cacheKey)
-    return undefined
-  }
-  return cacheEntry.binding
-}
-
-function writeRuntimeBindingCache(authorization = '', binding = null) {
-  const cacheKey = getBindingCacheKey(authorization)
-  if (!cacheKey) return
-  runtimeBindingCache.set(cacheKey, {
-    binding: binding || null,
-    expiresAt: Date.now() + RUNTIME_BINDING_CACHE_TTL_MS,
-  })
-}
-
-function buildRuntimeBindingStoreUrl(upstreamBaseUrl = '') {
-  const normalized = cleanText(upstreamBaseUrl)
-  if (!normalized) return ''
-  try {
-    const target = new URL(normalized)
-    const basePath = target.pathname.replace(/\/$/, '')
-    target.pathname = basePath.endsWith('/api')
-      ? `${basePath}/v1/public/runtime-domain/binding`
-      : `${basePath}/api/v1/public/runtime-domain/binding`
-    target.search = ''
-    target.hash = ''
-    return target.toString()
-  } catch {
-    return ''
-  }
-}
-
-function buildControlPlaneBootstrapUrl(upstreamBaseUrl = '') {
-  const normalized = cleanText(upstreamBaseUrl)
-  if (!normalized) return ''
-  try {
-    const target = new URL(normalized)
-    const basePath = target.pathname.replace(/\/$/, '')
-    target.pathname = basePath.endsWith('/api')
-      ? `${basePath}/v1/public/sdk/bootstrap`
-      : `${basePath}/api/v1/public/sdk/bootstrap`
-    target.search = ''
-    target.hash = ''
-    return target.toString()
-  } catch {
-    return ''
-  }
-}
-
-function logRuntimeBindingWarning(event, input = {}) {
-  const payload = {
-    source: cleanText(input.source),
-    status: Number(input.status || 0) || undefined,
-    requestId: cleanText(input.requestId),
-    code: cleanText(input.code),
-    message: cleanText(input.message),
-  }
-  console.warn(`[runtime-binding][${cleanText(event) || 'warn'}]`, payload)
-}
-
-function normalizeRuntimeBindingStorePayload(payload = {}) {
-  const source = payload && typeof payload === 'object' && !Array.isArray(payload)
-    ? payload
-    : {}
-  const candidate = source.binding && typeof source.binding === 'object' && !Array.isArray(source.binding)
-    ? source.binding
-    : source
-
-  const hasUsefulFields = Boolean(
-    cleanText(candidate.runtimeBaseUrl)
-    || cleanText(candidate.tenantId)
-    || cleanText(candidate.placementId)
-    || cleanText(candidate.bindStatus),
-  )
-  if (!hasUsefulFields) return null
-  return makeBindingSnapshot({}, candidate)
-}
-
-function normalizeControlPlaneBootstrapBindingPayload(payload = {}, authorization = '') {
-  const source = payload && typeof payload === 'object' && !Array.isArray(payload)
-    ? payload
-    : {}
-  const error = source.error && typeof source.error === 'object' && !Array.isArray(source.error)
-    ? source.error
-    : {}
-  const details = error.details && typeof error.details === 'object' && !Array.isArray(error.details)
-    ? error.details
-    : {}
-  const bindStatusInput = pickFirstText(
-    source.bindStatus,
-    details.bindStatus,
-    source.status === 'verified' ? 'verified' : '',
-  )
-  const bindStatus = bindStatusInput
-    ? normalizeBindStatus(bindStatusInput)
-    : ''
-  const runtimeSourceHint = cleanText(
-    source.runtimeSource
-    || source.runtimeSourceHint,
-  ).toLowerCase()
-  const routeRuntimeBaseUrl = cleanText(source.runtimeBaseUrl)
-  const customerRuntimeBaseUrl = runtimeSourceHint.startsWith('managed')
-    ? cleanText(source.customerRuntimeBaseUrl)
-    : pickFirstText(source.customerRuntimeBaseUrl, routeRuntimeBaseUrl)
-  const managedRuntimeBaseUrl = runtimeSourceHint.startsWith('managed')
-    ? routeRuntimeBaseUrl
-    : cleanText(source.managedRuntimeBaseUrl)
-  const tenantId = pickFirstText(
-    source.tenantId,
-    details.tenantId,
-    makeStableTenantId(authorization),
-  )
-  const placementId = pickFirstText(
-    source?.placementDefaults?.placementId,
-    source.placementId,
-    DEFAULT_PLACEMENT_ID,
-  )
-  const hasUsefulFields = Boolean(
-    bindStatus
-    || runtimeSourceHint
-    || routeRuntimeBaseUrl
-    || managedRuntimeBaseUrl
-    || customerRuntimeBaseUrl
-    || tenantId,
-  )
-  if (!hasUsefulFields) return null
-  return makeBindingSnapshot({}, {
-    tenantId,
-    placementId,
-    bindStatus: bindStatus || UNBOUND_BIND_STATUS,
-    runtimeSourceHint,
-    runtimeBaseUrl: runtimeSourceHint.startsWith('managed')
-      ? customerRuntimeBaseUrl
-      : routeRuntimeBaseUrl,
-    customerRuntimeBaseUrl,
-    managedRuntimeBaseUrl,
-    lastProbeCode: cleanText(source.lastProbeCode),
-  })
-}
-
-async function readBindingFromControlPlaneBootstrap(authorization = '') {
-  const normalizedAuthorization = normalizeAuthorization(authorization)
-  const upstreamBaseUrl = resolveUpstreamBaseUrl()
-  const targetUrl = buildControlPlaneBootstrapUrl(upstreamBaseUrl)
-  if (!normalizedAuthorization || !targetUrl) return { ok: false, binding: null }
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    controller.abort('Control plane bootstrap read timeout')
-  }, RUNTIME_BINDING_STORE_TIMEOUT_MS)
-
-  try {
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: {
-        authorization: normalizedAuthorization,
-        accept: 'application/json',
-      },
-      signal: controller.signal,
-    })
-
-    const payload = await readJsonResponse(response)
-    const binding = normalizeControlPlaneBootstrapBindingPayload(payload || {}, normalizedAuthorization)
-    if (response.ok) {
-      if (binding) return { ok: true, binding }
-      logRuntimeBindingWarning('control-plane-bootstrap-invalid', {
-        source: 'control_plane_bootstrap',
-        status: response.status,
-        message: 'Control plane bootstrap response does not include binding fields.',
-      })
-      return { ok: false, binding: null }
-    }
-    if (binding) return { ok: true, binding }
-    logRuntimeBindingWarning('control-plane-bootstrap-failed', {
-      source: 'control_plane_bootstrap',
-      status: response.status,
-      requestId: cleanText(payload?.requestId || payload?.error?.requestId),
-      code: cleanText(payload?.error?.code),
-      message: cleanText(payload?.error?.message || 'Control plane bootstrap request failed.'),
-    })
-    return { ok: false, binding: null }
-  } catch (error) {
-    logRuntimeBindingWarning('control-plane-bootstrap-failed', {
-      source: 'control_plane_bootstrap',
-      code: 'FETCH_FAILED',
-      message: error instanceof Error ? error.message : 'Control plane bootstrap request failed.',
-    })
-    return { ok: false, binding: null }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function readRuntimeBindingFromStore(authorization = '') {
-  const normalizedAuthorization = normalizeAuthorization(authorization)
-  const upstreamBaseUrl = resolveUpstreamBaseUrl()
-  const targetUrl = buildRuntimeBindingStoreUrl(upstreamBaseUrl)
-  if (!normalizedAuthorization || !targetUrl) return { ok: false, binding: null }
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    controller.abort('Runtime binding store read timeout')
-  }, RUNTIME_BINDING_STORE_TIMEOUT_MS)
-
-  try {
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: {
-        authorization: normalizedAuthorization,
-        accept: 'application/json',
-      },
-      signal: controller.signal,
-    })
-
-    if (response.status === 404) return { ok: true, binding: null }
-    if (!response.ok) {
-      logRuntimeBindingWarning('store-read-failed', {
-        source: 'binding_store',
-        status: response.status,
-        message: 'Runtime binding store read failed.',
-      })
-      return { ok: false, binding: null }
-    }
-
-    const payload = await readJsonResponse(response)
-    const binding = normalizeRuntimeBindingStorePayload(payload || {})
-    if (!binding && payload) {
-      logRuntimeBindingWarning('store-read-invalid', {
-        source: 'binding_store',
-        status: response.status,
-        message: 'Runtime binding store response does not include binding fields.',
-      })
-    }
-    return { ok: true, binding }
-  } catch (error) {
-    logRuntimeBindingWarning('store-read-failed', {
-      source: 'binding_store',
-      code: 'FETCH_FAILED',
-      message: error instanceof Error ? error.message : 'Runtime binding store read failed.',
-    })
-    return { ok: false, binding: null }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function writeRuntimeBindingToStore(authorization = '', binding = null) {
-  const normalizedAuthorization = normalizeAuthorization(authorization)
-  if (!normalizedAuthorization || !binding) return { ok: false, binding: null }
-
-  const upstreamBaseUrl = resolveUpstreamBaseUrl()
-  const targetUrl = buildRuntimeBindingStoreUrl(upstreamBaseUrl)
-  if (!targetUrl) return { ok: false, binding: null }
-
-  const snapshot = makeBindingSnapshot(binding, {
-    keyHash: cleanText(binding.keyHash || hashRuntimeApiKey(normalizedAuthorization)),
-    updatedAt: new Date().toISOString(),
-  })
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    controller.abort('Runtime binding store write timeout')
-  }, RUNTIME_BINDING_STORE_TIMEOUT_MS)
-
-  try {
-    const response = await fetch(targetUrl, {
-      method: 'PUT',
-      headers: {
-        authorization: normalizedAuthorization,
-        'content-type': 'application/json; charset=utf-8',
-        accept: 'application/json',
-      },
-      body: JSON.stringify({
-        binding: snapshot,
-      }),
-      signal: controller.signal,
-    })
-
-    if (!response.ok) {
-      logRuntimeBindingWarning('store-write-failed', {
-        source: 'binding_store',
-        status: response.status,
-        message: 'Runtime binding store write failed.',
-      })
-      return { ok: false, binding: snapshot }
-    }
-    const payload = await readJsonResponse(response)
-    const normalized = normalizeRuntimeBindingStorePayload(payload || {})
-    if (!normalized) {
-      logRuntimeBindingWarning('store-write-invalid', {
-        source: 'binding_store',
-        status: response.status,
-        message: 'Runtime binding store write response does not include binding fields.',
-      })
-    }
-    return { ok: true, binding: normalized || snapshot }
-  } catch (error) {
-    logRuntimeBindingWarning('store-write-failed', {
-      source: 'binding_store',
-      code: 'FETCH_FAILED',
-      message: error instanceof Error ? error.message : 'Runtime binding store write failed.',
-    })
-    return { ok: false, binding: snapshot }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function getRuntimeBindingByAuthorization(authorization = '', options = {}) {
-  const normalizedAuthorization = normalizeAuthorization(authorization)
-  if (!normalizedAuthorization) return null
-
-  const cached = readRuntimeBindingCache(normalizedAuthorization)
-  if (cached !== undefined && options?.ignoreCache !== true) return cached || null
-
-  const localBinding = runtimeDomainBindings.get(normalizedAuthorization) || null
-  const preferControlPlaneBootstrap = options?.preferControlPlaneBootstrap !== false
-  const preferStore = options?.preferStore !== false
-
-  if (preferControlPlaneBootstrap) {
-    const controlPlaneResult = await readBindingFromControlPlaneBootstrap(normalizedAuthorization)
-    if (controlPlaneResult.ok) {
-      const binding = controlPlaneResult.binding || null
-      if (binding) {
-        runtimeDomainBindings.set(normalizedAuthorization, binding)
-      }
-      writeRuntimeBindingCache(normalizedAuthorization, binding)
-      return binding
-    }
-  }
-
-  if (!preferStore) {
-    writeRuntimeBindingCache(normalizedAuthorization, localBinding)
-    return localBinding
-  }
-
-  const storeResult = await readRuntimeBindingFromStore(normalizedAuthorization)
-  if (storeResult.ok) {
-    const binding = storeResult.binding || localBinding || null
-    if (binding) {
-      runtimeDomainBindings.set(normalizedAuthorization, binding)
-    }
-    writeRuntimeBindingCache(normalizedAuthorization, binding)
-    return binding
-  }
-
-  writeRuntimeBindingCache(normalizedAuthorization, localBinding)
-  return localBinding
-}
-
-async function setRuntimeBindingByAuthorization(authorization = '', binding = null, options = {}) {
-  const normalizedAuthorization = normalizeAuthorization(authorization)
-  if (!normalizedAuthorization || !binding) return null
-
-  const currentBinding = runtimeDomainBindings.get(normalizedAuthorization) || {}
-  const snapshot = makeBindingSnapshot(currentBinding, {
-    ...binding,
-    keyHash: cleanText(binding.keyHash || currentBinding.keyHash || hashRuntimeApiKey(normalizedAuthorization)),
-    updatedAt: new Date().toISOString(),
-  })
-
-  runtimeDomainBindings.set(normalizedAuthorization, snapshot)
-  writeRuntimeBindingCache(normalizedAuthorization, snapshot)
-
-  if (options?.persist === false) return snapshot
-
-  const storeResult = await writeRuntimeBindingToStore(normalizedAuthorization, snapshot)
-  const persisted = storeResult.binding || snapshot
-  runtimeDomainBindings.set(normalizedAuthorization, persisted)
-  writeRuntimeBindingCache(normalizedAuthorization, persisted)
-  return persisted
 }
 
 export function normalizeUpstreamBaseUrl(rawValue) {
@@ -1174,131 +291,6 @@ export function resolveManagedRuntimeBaseUrl(env = process.env) {
   }
 }
 
-function shouldEnableManagedRuntimeFallback(env = process.env) {
-  return cleanText(env?.MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK) !== '0'
-}
-
-function buildManagedBidTargetUrl(upstreamBaseUrl) {
-  const normalizedUpstreamBaseUrl = cleanText(upstreamBaseUrl)
-  if (!normalizedUpstreamBaseUrl) return ''
-  try {
-    const target = new URL(normalizedUpstreamBaseUrl)
-    const basePath = target.pathname.replace(/\/$/, '')
-    target.pathname = basePath.endsWith('/api')
-      ? `${basePath}/v2/bid`
-      : `${basePath}/api/v2/bid`
-    target.search = ''
-    target.hash = ''
-    return target.toString()
-  } catch {
-    return ''
-  }
-}
-
-function buildRuntimeRouteFailureDetails(binding = {}) {
-  const bindStatus = normalizeBindStatus(binding?.bindStatus || UNBOUND_BIND_STATUS)
-  return {
-    bindStatus,
-    nextActions: bindStatus === UNBOUND_BIND_STATUS
-      ? [
-        'Bind a runtime domain via /api/v1/public/runtime-domain/verify-and-bind.',
-        'Ensure binding is synced on Mediation control plane for this API key.',
-        'Retry sdk/bootstrap after bindStatus is pending or verified.',
-      ]
-      : [
-        'Ensure MEDIATION_CONTROL_PLANE_API_BASE_URL is configured so control-plane bootstrap can be read.',
-        'Optionally set MEDIATION_MANAGED_RUNTIME_BASE_URL to override managed runtime origin.',
-        'Run runtime-domain probe and fix the reported probe error.',
-      ],
-  }
-}
-
-function resolveRuntimeRoute(binding = null, options = {}) {
-  const authorization = normalizeAuthorization(options.authorization)
-  const fallbackTenantId = makeStableTenantId(authorization)
-  const resolvedBinding = binding
-    ? makeBindingSnapshot(binding, {
-      tenantId: cleanText(binding.tenantId) || fallbackTenantId,
-    })
-    : makeBindingSnapshot({}, {
-      tenantId: fallbackTenantId,
-      bindStatus: UNBOUND_BIND_STATUS,
-    })
-  const bindStatus = normalizeBindStatus(resolvedBinding?.bindStatus || UNBOUND_BIND_STATUS)
-  const customerRuntimeBaseUrl = pickFirstText(
-    resolvedBinding?.customerRuntimeBaseUrl,
-    resolvedBinding?.runtimeBaseUrl,
-  )
-  const managedRuntimeFromBinding = pickFirstText(
-    resolvedBinding?.managedRuntimeBaseUrl,
-    cleanText(resolvedBinding?.runtimeSourceHint).startsWith('managed')
-      ? cleanText(resolvedBinding?.runtimeBaseUrl)
-      : '',
-  )
-  const managedFallbackEnabled = shouldEnableManagedRuntimeFallback()
-  const managedRuntimeBaseUrl = managedFallbackEnabled
-    ? pickFirstText(managedRuntimeFromBinding, resolveManagedRuntimeBaseUrl())
-    : ''
-
-  if (bindStatus === 'verified' && customerRuntimeBaseUrl) {
-    return {
-      ok: true,
-      runtimeSource: 'customer',
-      runtimeBaseUrl: customerRuntimeBaseUrl,
-      customerRuntimeBaseUrl,
-      bindStatus: 'verified',
-      tenantId: cleanText(resolvedBinding?.tenantId),
-      binding: resolvedBinding,
-    }
-  }
-
-  if (bindStatus === UNBOUND_BIND_STATUS) {
-    const failureDetails = buildRuntimeRouteFailureDetails(resolvedBinding)
-    return {
-      ok: false,
-      code: 'BINDING_NOT_READY',
-      message: 'Runtime binding is not ready for this API key.',
-      bindStatus: failureDetails.bindStatus,
-      tenantId: cleanText(resolvedBinding?.tenantId),
-      nextActions: failureDetails.nextActions,
-      binding: resolvedBinding,
-    }
-  }
-
-  if (binding && bindStatus !== 'verified') {
-    if (managedRuntimeBaseUrl) {
-      return {
-        ok: true,
-        runtimeSource: 'managed_fallback',
-        runtimeBaseUrl: managedRuntimeBaseUrl,
-        customerRuntimeBaseUrl: customerRuntimeBaseUrl || undefined,
-        bindStatus,
-        tenantId: cleanText(resolvedBinding?.tenantId),
-        binding: resolvedBinding,
-      }
-    }
-    const failureDetails = buildRuntimeRouteFailureDetails(resolvedBinding)
-    return {
-      ok: false,
-      code: 'MANAGED_RUNTIME_NOT_CONFIGURED',
-      message: 'Managed runtime fallback is not configured for this API key.',
-      bindStatus: failureDetails.bindStatus,
-      nextActions: failureDetails.nextActions,
-      binding: resolvedBinding,
-    }
-  }
-
-  const failureDetails = buildRuntimeRouteFailureDetails({})
-  return {
-    ok: false,
-    code: 'MANAGED_RUNTIME_NOT_CONFIGURED',
-    message: 'Managed runtime default route is not configured for this API key.',
-    bindStatus: failureDetails.bindStatus,
-    nextActions: failureDetails.nextActions,
-    binding: null,
-  }
-}
-
 export function buildUpstreamUrl(req, upstreamBaseUrl) {
   const requestUrl = new URL(req.url || '/api', 'http://localhost')
   const base = new URL(upstreamBaseUrl)
@@ -1333,18 +325,6 @@ export function buildUpstreamHeaders(req) {
   }
 
   return headers
-}
-
-function cleanText(value) {
-  return String(value || '').trim()
-}
-
-function pickFirstText(...values) {
-  for (const value of values) {
-    const normalized = cleanText(value)
-    if (normalized) return normalized
-  }
-  return ''
 }
 
 function readAccountId(source = {}) {
@@ -1479,12 +459,10 @@ async function maybeEnrichRequest(req, upstreamBaseUrl, headers, body, signal) {
     return sessionScope
   }
 
-  if (isRegister) {
-    if (!readAccountId(nextPayload)) {
-      const email = cleanText(nextPayload.email).split('@')[0] || ''
-      nextPayload.accountId = makeGeneratedAccountId(email)
-      mutated = true
-    }
+  if (isRegister && !readAccountId(nextPayload)) {
+    const email = cleanText(nextPayload.email).split('@')[0] || ''
+    nextPayload.accountId = makeGeneratedAccountId(email)
+    mutated = true
   }
 
   if (isCreateKey || isVerify) {
@@ -1619,398 +597,30 @@ export function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload))
 }
 
-function getRuntimeGatewayHost(env = process.env) {
-  const configured = cleanText(env?.MEDIATION_RUNTIME_GATEWAY_HOST)
-  return normalizeHost(configured || DEFAULT_RUNTIME_GATEWAY_HOST)
+function readHeaderValue(headers = {}, key) {
+  if (!headers || typeof headers !== 'object') return ''
+  const direct = headers[key]
+  if (Array.isArray(direct)) {
+    return cleanText(direct[0])
+  }
+  if (direct !== undefined) return cleanText(direct)
+  const lower = headers[String(key || '').toLowerCase()]
+  if (Array.isArray(lower)) return cleanText(lower[0])
+  return cleanText(lower)
 }
 
-function shouldRequireGatewayCname(env = process.env) {
-  return cleanText(env?.MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME) === '1'
+function normalizeAuthorization(rawValue) {
+  return cleanText(rawValue)
 }
 
-function applyProbeStatusToChecks(checks, probeResult) {
-  const next = {
-    ...(checks || createChecks()),
+function stripResponseHopByHopHeaders(responseHeaders = {}) {
+  const output = {}
+  for (const [key, value] of Object.entries(responseHeaders || {})) {
+    const normalizedKey = String(key || '').toLowerCase()
+    if (RESPONSE_HEADERS_TO_STRIP.has(normalizedKey)) continue
+    output[key] = value
   }
-  if (!probeResult || typeof probeResult !== 'object') return next
-  const code = cleanText(probeResult.code).toUpperCase()
-  if (probeResult.ok) {
-    next.authOk = true
-    next.bidOk = true
-    next.landingUrlOk = Boolean(cleanText(probeResult.landingUrl))
-    return next
-  }
-  if (code === 'AUTH_401_403') {
-    next.authOk = false
-  }
-  next.bidOk = false
-  next.landingUrlOk = false
-  return next
-}
-
-async function runServerRuntimeProbe(input = {}) {
-  const deps = input.deps || getRuntimeDeps()
-  const probe = await probeBid(
-    input.runtimeBaseUrl,
-    input.placementId,
-    input.authorization,
-    deps,
-    {
-      probeHeaders: input.probeHeaders || {},
-    },
-  )
-  return createProbeResult('server', probe)
-}
-
-async function handleRuntimeDomainVerifyAndBind(req, res) {
-  const requestId = createRequestId('req_runtime_bind')
-  const checks = createChecks()
-  const deps = getRuntimeDeps()
-  const requestBody = await readRequestBody(req)
-  const payload = parseJsonBody(requestBody)
-  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
-
-  const placementId = cleanText(payload?.placementId) || DEFAULT_PLACEMENT_ID
-  const normalizedDomain = normalizeRuntimeDomain(payload?.domain)
-  const runtimeBaseUrl = normalizedDomain.runtimeBaseUrl || ''
-  const tenantId = makeTenantId(authorization || 'runtime', deps)
-
-  let probeHeaders = {}
-  try {
-    probeHeaders = sanitizeProbeHeaders(payload?.probeHeaders || {})
-  } catch (error) {
-    const probeResult = toProbeFailureResult(error, 'server')
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'failed',
-      bindStage: 'rejected',
-      runtimeBaseUrl,
-      checks,
-      requestId,
-      failureCode: probeResult.code,
-      probeResult,
-      nextActions: buildNextActions(probeResult.code),
-    }))
-    return
-  }
-
-  if (!authorization) {
-    const probeResult = createProbeResult('server', {
-      ok: false,
-      code: 'AUTH_401_403',
-      detail: 'Authorization header is required.',
-    })
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'failed',
-      bindStage: 'rejected',
-      runtimeBaseUrl,
-      checks,
-      requestId,
-      failureCode: probeResult.code,
-      probeResult,
-      nextActions: buildNextActions(probeResult.code),
-    }))
-    return
-  }
-
-  if (!normalizedDomain.ok) {
-    const probeResult = createProbeResult('server', {
-      ok: false,
-      code: normalizedDomain.failureCode || 'CNAME_MISMATCH',
-      detail: 'Runtime domain is invalid.',
-    })
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'failed',
-      bindStage: 'rejected',
-      runtimeBaseUrl,
-      checks,
-      requestId,
-      failureCode: probeResult.code,
-      probeResult,
-      nextActions: buildNextActions(probeResult.code),
-    }))
-    return
-  }
-
-  try {
-    const dnsChecks = await resolveDnsWithCname(
-      normalizedDomain.hostname,
-      getRuntimeGatewayHost(),
-      deps,
-      {
-        requireGatewayCname: shouldRequireGatewayCname(),
-      },
-    )
-    checks.dnsOk = dnsChecks.dnsOk
-    checks.cnameOk = dnsChecks.cnameOk
-
-    const tlsChecks = await verifyTls(normalizedDomain.hostname, deps)
-    checks.tlsOk = tlsChecks.tlsOk
-    checks.connectOk = tlsChecks.connectOk
-
-    const existingBinding = await getRuntimeBindingByAuthorization(authorization, {
-      preferControlPlaneBootstrap: false,
-    }) || {}
-    const pendingBinding = makeBindingSnapshot(existingBinding, {
-      tenantId: existingBinding.tenantId || tenantId,
-      runtimeBaseUrl,
-      placementId,
-      bindStatus: 'pending',
-      verifiedAt: '',
-      lastProbeAt: new Date().toISOString(),
-      probeHeadersEncrypted: encodeProbeHeaders(probeHeaders),
-    })
-    await setRuntimeBindingByAuthorization(authorization, pendingBinding)
-
-    let serverProbe
-    try {
-      serverProbe = await runServerRuntimeProbe({
-        runtimeBaseUrl,
-        placementId,
-        authorization,
-        deps,
-        probeHeaders,
-      })
-    } catch (error) {
-      serverProbe = toProbeFailureResult(error, 'server')
-      const updatedPendingBinding = makeBindingSnapshot(pendingBinding, {
-        bindStatus: 'pending',
-        lastProbeAt: new Date().toISOString(),
-        lastProbeCode: serverProbe.code,
-        lastProbeHttpStatus: Number(serverProbe.httpStatus || 0),
-        probeDiagnostics: {
-          serverProbe,
-        },
-      })
-      await setRuntimeBindingByAuthorization(authorization, updatedPendingBinding)
-      const checksWithProbe = applyProbeStatusToChecks(checks, serverProbe)
-      sendJson(res, 200, withProbeCompatibility({
-        status: 'pending',
-        bindStage: 'probe_failed',
-        runtimeBaseUrl,
-        checks: checksWithProbe,
-        requestId,
-        failureCode: serverProbe.code,
-        probeResult: serverProbe,
-        nextActions: buildNextActions(serverProbe.code),
-        ...projectBindingForResponse(updatedPendingBinding),
-      }))
-      return
-    }
-
-    const checksWithProbe = applyProbeStatusToChecks(checks, serverProbe)
-    const verifiedBinding = makeBindingSnapshot(pendingBinding, {
-      bindStatus: 'verified',
-      verifiedAt: new Date().toISOString(),
-      lastProbeAt: new Date().toISOString(),
-      lastProbeCode: serverProbe.code,
-      lastProbeHttpStatus: Number(serverProbe.httpStatus || 0),
-      probeDiagnostics: {
-        serverProbe,
-      },
-    })
-    await setRuntimeBindingByAuthorization(authorization, verifiedBinding)
-
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'verified',
-      bindStage: 'bound',
-      runtimeBaseUrl,
-      checks: checksWithProbe,
-      requestId,
-      landingUrlSample: serverProbe.landingUrl,
-      probeResult: serverProbe,
-      nextActions: [],
-      ...projectBindingForResponse(verifiedBinding),
-    }))
-  } catch (error) {
-    const probeResult = toProbeFailureResult(error, 'server')
-    const checksWithProbe = applyProbeStatusToChecks(checks, probeResult)
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'failed',
-      bindStage: 'rejected',
-      runtimeBaseUrl,
-      checks: checksWithProbe,
-      requestId,
-      failureCode: probeResult.code,
-      probeResult,
-      nextActions: buildNextActions(probeResult.code),
-      ...projectBindingForResponse(makeBindingSnapshot({}, {
-        tenantId,
-        runtimeBaseUrl,
-        placementId,
-        bindStatus: 'failed',
-      })),
-    }))
-  }
-}
-
-async function handleRuntimeDomainProbe(req, res) {
-  const requestId = createRequestId('req_runtime_probe')
-  const deps = getRuntimeDeps()
-  const requestBody = await readRequestBody(req)
-  const payload = parseJsonBody(requestBody) || {}
-  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
-  if (!authorization) {
-    sendJson(res, 401, {
-      error: {
-        code: 'AUTH_401_403',
-        message: 'Authorization header is required.',
-      },
-    })
-    return
-  }
-
-  const binding = await getRuntimeBindingByAuthorization(authorization, {
-    preferControlPlaneBootstrap: false,
-  }) || {}
-  const normalizedDomain = cleanText(payload?.domain)
-    ? normalizeRuntimeDomain(payload?.domain)
-    : null
-  if (normalizedDomain && !normalizedDomain.ok) {
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'failed',
-      finalStatus: 'failed',
-      requestId,
-      failureCode: normalizedDomain.failureCode || 'CNAME_MISMATCH',
-      serverProbe: createProbeResult('server', {
-        ok: false,
-        code: normalizedDomain.failureCode || 'CNAME_MISMATCH',
-        detail: 'Runtime domain is invalid.',
-      }),
-      nextActions: buildNextActions(normalizedDomain.failureCode || 'CNAME_MISMATCH'),
-    }))
-    return
-  }
-
-  const runtimeBaseUrl = normalizedDomain?.runtimeBaseUrl || cleanText(binding.runtimeBaseUrl)
-  if (!runtimeBaseUrl) {
-    sendJson(res, 404, {
-      error: {
-        code: 'RUNTIME_DOMAIN_NOT_BOUND',
-        message: 'Runtime domain is not bound for this API key.',
-      },
-    })
-    return
-  }
-
-  const placementId = cleanText(payload?.placementId || binding.placementId || DEFAULT_PLACEMENT_ID)
-  let probeHeaders = {}
-  try {
-    const incomingProbeHeaders = payload?.probeHeaders
-    if (incomingProbeHeaders && typeof incomingProbeHeaders === 'object') {
-      probeHeaders = sanitizeProbeHeaders(incomingProbeHeaders)
-    } else {
-      probeHeaders = sanitizeProbeHeaders(decodeProbeHeaders(binding.probeHeadersEncrypted))
-    }
-  } catch (error) {
-    const failedProbe = toProbeFailureResult(error, 'server')
-    sendJson(res, 200, withProbeCompatibility({
-      status: 'failed',
-      finalStatus: 'failed',
-      runtimeBaseUrl,
-      requestId,
-      failureCode: failedProbe.code,
-      serverProbe: failedProbe,
-      nextActions: buildNextActions(failedProbe.code),
-    }))
-    return
-  }
-
-  let serverProbe
-  try {
-    serverProbe = await runServerRuntimeProbe({
-      runtimeBaseUrl,
-      placementId,
-      authorization,
-      deps,
-      probeHeaders,
-    })
-  } catch (error) {
-    serverProbe = toProbeFailureResult(error, 'server')
-  }
-
-  const browserProbe = payload?.runBrowserProbe === true
-    ? normalizeBrowserProbePayload(payload?.browserProbe || {})
-    : null
-
-  const decision = computeProbeFinalStatus(serverProbe, browserProbe)
-  const failureCode = decision.status === 'verified' ? '' : decision.code
-  const tenantId = cleanText(binding.tenantId) || makeTenantId(authorization, deps)
-  const nextBinding = makeBindingSnapshot(binding, {
-    tenantId,
-    runtimeBaseUrl,
-    placementId,
-    bindStatus: decision.status === 'verified' ? 'verified' : 'pending',
-    verifiedAt: decision.status === 'verified' ? new Date().toISOString() : '',
-    lastProbeAt: new Date().toISOString(),
-    lastProbeCode: failureCode || 'VERIFIED',
-    lastProbeHttpStatus: Number(serverProbe.httpStatus || browserProbe?.httpStatus || 0),
-    probeHeadersEncrypted: encodeProbeHeaders(probeHeaders),
-    probeDiagnostics: {
-      serverProbe,
-      browserProbe,
-      finalCode: failureCode || 'VERIFIED',
-    },
-  })
-  await setRuntimeBindingByAuthorization(authorization, nextBinding)
-
-  const response = withProbeCompatibility({
-    status: decision.status,
-    finalStatus: decision.status,
-    requestId,
-    runtimeBaseUrl,
-    failureCode: failureCode || undefined,
-    probeResult: decision.status === 'verified'
-      ? serverProbe
-      : createProbeResult('server', {
-        ok: false,
-        code: failureCode,
-        httpStatus: Number(serverProbe.httpStatus || 0),
-        detail: serverProbe.detail,
-      }),
-    serverProbe,
-    browserProbe: browserProbe || undefined,
-    nextActions: failureCode ? buildNextActions(failureCode) : [],
-    ...projectBindingForResponse(nextBinding),
-  })
-  sendJson(res, 200, response)
-}
-
-function buildRuntimeRouteError(route = {}, requestId = '') {
-  return {
-    error: {
-      code: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
-      message: cleanText(route.message || 'No runtime route is available for this API key.'),
-      requestId: cleanText(requestId),
-      details: {
-        bindStatus: normalizeBindStatus(route.bindStatus || UNBOUND_BIND_STATUS),
-        tenantId: cleanText(route.tenantId),
-        nextActions: Array.isArray(route.nextActions) ? route.nextActions : [],
-      },
-    },
-  }
-}
-
-function pickNoFillAction(route = {}, fallbackMessage = '') {
-  if (Array.isArray(route.nextActions) && route.nextActions.length > 0) {
-    return cleanText(route.nextActions[0])
-  }
-  return cleanText(fallbackMessage)
-}
-
-function buildNoFillResponse(input = {}) {
-  return {
-    filled: false,
-    reasonCode: cleanText(input.reasonCode || 'NO_FILL'),
-    reasonMessage: cleanText(input.reasonMessage || 'Ad request returned no fill.'),
-    nextAction: cleanText(input.nextAction),
-    requestId: cleanText(input.requestId),
-    traceId: cleanText(input.traceId),
-    runtimeSource: cleanText(input.runtimeSource || 'unknown'),
-    bindStatus: cleanText(input.bindStatus),
-    tenantId: cleanText(input.tenantId),
-    routeCode: cleanText(input.routeCode),
-    upstreamStatus: Number(input.upstreamStatus || 0) || 0,
-  }
+  return output
 }
 
 async function requestRuntimeBid(input = {}) {
@@ -2018,7 +628,6 @@ async function requestRuntimeBid(input = {}) {
   const targetUrl = cleanText(input.targetUrl)
   const requestBody = input.requestBody
   const headers = input.headers || {}
-  const usingManagedRuntime = input.usingManagedRuntime === true
 
   try {
     const upstreamResponse = await deps.fetch(targetUrl, {
@@ -2051,7 +660,6 @@ async function requestRuntimeBid(input = {}) {
         status: 502,
         errorCode: 'BID_INVALID_RESPONSE',
         errorMessage: 'Runtime bid response is not valid JSON.',
-        upstreamStatus: status,
       }
     }
 
@@ -2061,14 +669,6 @@ async function requestRuntimeBid(input = {}) {
         status,
         errorCode: cleanText(jsonPayload.reasonCode || 'UPSTREAM_NO_FILL'),
         errorMessage: cleanText(jsonPayload.reasonMessage || 'Runtime bid response returned filled=false.'),
-        nextAction: cleanText(jsonPayload.nextAction),
-        upstreamRequestId: cleanText(
-          jsonPayload.requestId
-          || jsonPayload.traceId
-          || jsonPayload.bid?.requestId,
-        ),
-        upstreamStatus: status,
-        upstreamPayload: jsonPayload,
       }
     }
 
@@ -2079,13 +679,6 @@ async function requestRuntimeBid(input = {}) {
         status: 502,
         errorCode: 'BID_INVALID_RESPONSE',
         errorMessage: 'Runtime bid response does not include landingUrl.',
-        upstreamRequestId: cleanText(
-          jsonPayload.requestId
-          || jsonPayload.traceId
-          || jsonPayload.bid?.requestId,
-        ),
-        upstreamStatus: status,
-        upstreamPayload: jsonPayload,
       }
     }
 
@@ -2094,68 +687,16 @@ async function requestRuntimeBid(input = {}) {
       passthrough: false,
       status,
       payload: normalizedPayload,
-      landingUrl,
       responseHeaders,
     }
   } catch {
     return {
       ok: false,
       status: 502,
-      errorCode: usingManagedRuntime ? 'MANAGED_RUNTIME_UNAVAILABLE' : 'NETWORK_BLOCKED',
-      errorMessage: usingManagedRuntime
-        ? 'Failed to reach managed runtime /api/v2/bid.'
-        : 'Failed to reach runtime domain /api/v2/bid.',
-      upstreamStatus: 0,
+      errorCode: 'NETWORK_BLOCKED',
+      errorMessage: 'Failed to reach runtime /api/v2/bid.',
     }
   }
-}
-
-async function handleSdkBootstrap(req, res) {
-  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
-  if (!authorization) {
-    sendJson(res, 401, {
-      error: {
-        code: 'AUTH_FORBIDDEN',
-        message: 'Authorization header is required.',
-      },
-    })
-    return
-  }
-
-  const binding = await getRuntimeBindingByAuthorization(authorization)
-  const route = resolveRuntimeRoute(binding, {
-    authorization,
-  })
-  if (!route.ok) {
-    sendJson(res, 503, buildRuntimeRouteError(route, createRequestId('req_runtime_route')))
-    return
-  }
-
-  const projectedBinding = projectBindingForResponse(
-    route.binding || makeBindingSnapshot({}, {
-      tenantId: route.tenantId,
-      bindStatus: route.bindStatus,
-    }),
-  )
-
-  sendJson(res, 200, {
-    ...projectedBinding,
-    runtimeBaseUrl: route.runtimeBaseUrl,
-    runtimeSource: route.runtimeSource,
-    customerRuntimeBaseUrl: route.customerRuntimeBaseUrl || undefined,
-    lastProbeCode: cleanText(binding?.lastProbeCode),
-    bindStatus: route.bindStatus,
-  })
-}
-
-function stripResponseHopByHopHeaders(responseHeaders = {}) {
-  const output = {}
-  for (const [key, value] of Object.entries(responseHeaders || {})) {
-    const normalizedKey = String(key || '').toLowerCase()
-    if (RESPONSE_HEADERS_TO_STRIP.has(normalizedKey)) continue
-    output[key] = value
-  }
-  return output
 }
 
 async function handleRuntimeBidProxy(req, res) {
@@ -2169,6 +710,7 @@ async function handleRuntimeBidProxy(req, res) {
     })
     return
   }
+
   const runtimeApiBaseUrl = resolveRuntimeApiBaseUrl()
   if (!runtimeApiBaseUrl) {
     sendJson(res, 500, {
@@ -2190,11 +732,10 @@ async function handleRuntimeBidProxy(req, res) {
     targetUrl,
     requestBody,
     headers,
-    usingManagedRuntime: false,
   })
 
+  res.setHeader('x-tappy-runtime-source', 'runtime_api_base_url')
   if (!bidResult.ok) {
-    res.setHeader('x-tappy-runtime-source', 'runtime_api_base_url')
     sendJson(res, Number(bidResult.status || 502), {
       error: {
         code: cleanText(bidResult.errorCode || 'NETWORK_BLOCKED'),
@@ -2204,7 +745,6 @@ async function handleRuntimeBidProxy(req, res) {
     return
   }
 
-  res.setHeader('x-tappy-runtime-source', 'runtime_api_base_url')
   if (bidResult.passthrough) {
     res.statusCode = Number(bidResult.status || 200)
     for (const [key, value] of Object.entries(bidResult.responseHeaders || {})) {
@@ -2223,90 +763,6 @@ async function handleRuntimeBidProxy(req, res) {
   res.end(JSON.stringify(bidResult.payload))
 }
 
-async function handleAdBid(req, res) {
-  const traceId = createRequestId('req_ad_bid')
-  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
-  if (!authorization) {
-    sendJson(res, 200, buildNoFillResponse({
-      requestId: traceId,
-      traceId,
-      reasonCode: 'AUTH_FORBIDDEN',
-      reasonMessage: 'Authorization header is required.',
-      nextAction: 'Set Authorization header: Bearer <MEDIATION_API_KEY>.',
-      runtimeSource: 'unknown',
-    }))
-    return
-  }
-
-  const binding = await getRuntimeBindingByAuthorization(authorization)
-  const route = resolveRuntimeRoute(binding, {
-    authorization,
-  })
-  if (!route.ok) {
-    const noFill = buildNoFillResponse({
-      requestId: traceId,
-      traceId,
-      reasonCode: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
-      reasonMessage: cleanText(route.message || 'No runtime route available for this API key.'),
-      nextAction: pickNoFillAction(route),
-      runtimeSource: 'none',
-      bindStatus: route.bindStatus,
-      tenantId: route.tenantId,
-      routeCode: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
-      upstreamStatus: 0,
-    })
-    console.warn('[ad-bid][no-fill]', noFill)
-    sendJson(res, 200, noFill)
-    return
-  }
-
-  const deps = getRuntimeDeps()
-  const requestBody = await readRequestBody(req)
-  const headers = buildUpstreamHeaders(req)
-  headers.authorization = authorization
-  headers['x-tappy-tenant-id'] = cleanText(route.tenantId)
-  headers['x-tappy-bind-status'] = cleanText(route.bindStatus)
-  headers['x-tappy-runtime-source'] = cleanText(route.runtimeSource)
-
-  const bidResult = await requestRuntimeBid({
-    deps,
-    targetUrl: `${cleanText(route.runtimeBaseUrl)}/api/v2/bid`,
-    requestBody,
-    headers,
-    usingManagedRuntime: route.runtimeSource.startsWith('managed'),
-  })
-
-  if (!bidResult.ok || bidResult.passthrough) {
-    const noFill = buildNoFillResponse({
-      requestId: cleanText(bidResult.upstreamRequestId || traceId),
-      traceId,
-      reasonCode: cleanText(bidResult.errorCode || 'BID_INVALID_RESPONSE'),
-      reasonMessage: cleanText(bidResult.errorMessage || 'Runtime bid response is not valid JSON.'),
-      nextAction: cleanText(
-        bidResult.nextAction
-        || pickNoFillAction(route, 'Retry later or verify runtime route health in dashboard diagnostics.'),
-      ),
-      runtimeSource: route.runtimeSource,
-      bindStatus: route.bindStatus,
-      tenantId: route.tenantId,
-      routeCode: cleanText(bidResult.errorCode || ''),
-      upstreamStatus: Number(bidResult.upstreamStatus || bidResult.status || 0),
-    })
-    console.warn('[ad-bid][no-fill]', noFill)
-    sendJson(res, 200, noFill)
-    return
-  }
-
-  sendJson(res, 200, {
-    filled: true,
-    traceId,
-    runtimeSource: route.runtimeSource,
-    landingUrl: bidResult.landingUrl,
-    requestId: cleanText(bidResult.payload?.requestId || traceId),
-    bid: bidResult.payload,
-  })
-}
-
 export default async function dashboardApiProxyHandler(req, res) {
   const method = cleanText(req.method || 'GET').toUpperCase()
   const pathname = readReqPathname(req)
@@ -2323,6 +779,7 @@ export default async function dashboardApiProxyHandler(req, res) {
       return
     }
   }
+
   if (pathname === '/api/v2/bid' && method === 'POST') {
     await handleRuntimeBidProxy(req, res)
     return
