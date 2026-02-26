@@ -850,4 +850,167 @@ describe('dashboardApiProxyHandler', () => {
       }),
     )
   })
+
+  it('serves managed_default bootstrap for unbound API key when managed runtime is configured', async () => {
+    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
+    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_unbound_bootstrap',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+
+    expect(bootstrapRes.statusCode).toBe(200)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      runtimeSource: 'managed_default',
+      runtimeBaseUrl: 'https://runtime-managed.example.com',
+      bindStatus: 'unbound',
+    })
+  })
+
+  it('returns structured route error for unbound API key when managed runtime is unavailable', async () => {
+    delete process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_unbound_fail',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+
+    expect(bootstrapRes.statusCode).toBe(503)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      error: {
+        code: 'MANAGED_RUNTIME_NOT_CONFIGURED',
+        details: {
+          bindStatus: 'unbound',
+        },
+      },
+    })
+  })
+
+  it('routes /api/v2/bid to managed runtime by default for unbound API key', async () => {
+    process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL = 'https://runtime-managed.example.com'
+    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+
+    const runtimeFetch = vi.fn().mockResolvedValue(createJsonUpstreamResponse({
+      requestId: 'req_managed_default_bid',
+      landingUrl: 'https://ads.customer.example/managed-default',
+    }))
+    setRuntimeDepsForTests({
+      fetch: runtimeFetch,
+    })
+
+    const bidReq = createMockReq('/api/v2/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_unbound_bid',
+      'content-type': 'application/json',
+    })
+    bidReq.body = {
+      placementId: 'chat_from_answer_v1',
+      messages: [],
+    }
+
+    const bidRes = createMockRes()
+    await dashboardApiProxyHandler(bidReq, bidRes)
+
+    expect(bidRes.statusCode).toBe(200)
+    expect(bidRes.headers['x-tappy-runtime-source']).toBe('managed_default')
+    expect(JSON.parse(bidRes.body)).toMatchObject({
+      requestId: 'req_managed_default_bid',
+      landingUrl: 'https://ads.customer.example/managed-default',
+    })
+    expect(runtimeFetch).toHaveBeenCalledWith(
+      'https://runtime-managed.example.com/api/v2/bid',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+  })
+
+  it('returns structured no-fill payload on /api/ad/bid when runtime route is unavailable', async () => {
+    delete process.env.MEDIATION_MANAGED_RUNTIME_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+
+    const req = createMockReq('/api/ad/bid', 'POST', {
+      authorization: 'Bearer sk_runtime_ad_bid',
+      'content-type': 'application/json',
+    })
+    req.body = { messages: [] }
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toMatchObject({
+      filled: false,
+      reasonCode: 'MANAGED_RUNTIME_NOT_CONFIGURED',
+      runtimeSource: 'none',
+    })
+  })
+
+  it('restores runtime binding from control plane binding store after local cache reset', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com/api'
+    let storedBinding = null
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options = {}) => {
+      const normalizedUrl = String(url)
+      const method = String(options?.method || 'GET').toUpperCase()
+      if (normalizedUrl !== 'https://prod.example.com/api/v1/public/runtime-domain/binding') {
+        throw new Error(`Unexpected binding store URL: ${normalizedUrl}`)
+      }
+      if (method === 'PUT') {
+        storedBinding = JSON.parse(String(options.body || '{}')).binding
+        return createJsonUpstreamResponse({ binding: storedBinding })
+      }
+      if (method === 'GET') {
+        if (!storedBinding) return createJsonUpstreamResponse({}, 404)
+        return createJsonUpstreamResponse({ binding: storedBinding })
+      }
+      throw new Error(`Unexpected method: ${method}`)
+    })
+
+    setRuntimeDepsForTests({
+      resolve4: vi.fn().mockResolvedValue(['203.0.113.11']),
+      resolve6: vi.fn().mockResolvedValue([]),
+      resolveCname: vi.fn().mockResolvedValue(['runtime-gateway.tappy.ai']),
+      tlsConnect: createTlsConnectStub(),
+      fetch: vi.fn().mockResolvedValue(createJsonUpstreamResponse({
+        requestId: 'req_bind_store_ok',
+        landingUrl: 'https://ads.customer.example/restored',
+      })),
+      now: () => 1735689600000,
+    })
+
+    const verifyReq = createMockReq('/api/v1/public/runtime-domain/verify-and-bind', 'POST', {
+      authorization: 'Bearer sk_runtime_restore',
+      'content-type': 'application/json',
+    })
+    verifyReq.body = {
+      domain: 'runtime.customer-restore.org',
+      placementId: 'chat_from_answer_v1',
+    }
+    const verifyRes = createMockRes()
+    await dashboardApiProxyHandler(verifyReq, verifyRes)
+    expect(JSON.parse(verifyRes.body).status).toBe('verified')
+
+    clearRuntimeDomainBindingsForTests()
+
+    const bootstrapReq = createMockReq('/api/v1/public/sdk/bootstrap', 'GET', {
+      authorization: 'Bearer sk_runtime_restore',
+    })
+    const bootstrapRes = createMockRes()
+    await dashboardApiProxyHandler(bootstrapReq, bootstrapRes)
+
+    expect(bootstrapRes.statusCode).toBe(200)
+    expect(JSON.parse(bootstrapRes.body)).toMatchObject({
+      runtimeSource: 'customer',
+      runtimeBaseUrl: 'https://runtime.customer-restore.org',
+      bindStatus: 'verified',
+    })
+  })
 })

@@ -139,7 +139,10 @@ const bootstrapEvidence = computed(() => (
 const bootstrapRuntimeSource = computed(() => (
   String(bootstrapResult.value?.runtimeSource || '').trim().toLowerCase()
 ))
-const usingManagedRuntimeFallback = computed(() => bootstrapRuntimeSource.value === 'managed_fallback')
+const usingManagedRuntimeRoute = computed(() => (
+  bootstrapRuntimeSource.value === 'managed_fallback'
+  || bootstrapRuntimeSource.value === 'managed_default'
+))
 
 watch(revealedSecret, (value) => {
   if (!runtimeApiKeyInput.value && value) {
@@ -298,7 +301,7 @@ async function applyRuntimePayload(payload = {}) {
     return
   }
 
-  if (status === 'pending' && usingManagedRuntimeFallback.value) {
+  if (status === 'pending' && usingManagedRuntimeRoute.value) {
     runtimeError.value = '[MANAGED_FALLBACK] Custom runtime domain is pending. SDK will use managed runtime automatically so integration can continue.'
     return
   }
@@ -620,7 +623,7 @@ onMounted(() => {
       <div class="header-stack">
         <p class="eyebrow">Onboarding</p>
         <h2>Onboarding</h2>
-        <p class="subtitle">Bind customer runtime domain first, then verify runtime probe health.</p>
+        <p class="subtitle">Start with API key only. Runtime bind is an optional optimization for custom domains.</p>
       </div>
       <div class="header-actions">
         <span :class="onboardingStatusClass">{{ onboardingStatusLabel }}</span>
@@ -629,7 +632,7 @@ onMounted(() => {
 
     <article class="panel">
       <div class="panel-toolbar">
-        <h3>Step A (Optional): Generate runtime key</h3>
+        <h3>Step A: Generate or paste runtime key</h3>
         <button class="button" type="button" :disabled="keyLoading || !scopeState.accountId" @click="createFirstKey">
           {{ keyLoading ? 'Generating...' : 'Generate key' }}
         </button>
@@ -647,7 +650,7 @@ onMounted(() => {
 
     <article class="panel">
       <div class="panel-toolbar">
-        <h3>Step B: Bind and probe runtime domain</h3>
+        <h3>Step B (Advanced, optional): Bind and probe custom runtime domain</h3>
       </div>
 
       <div class="form-grid">
@@ -724,7 +727,7 @@ onMounted(() => {
       </div>
 
       <p class="muted">
-        Bind success may still return <code>pending</code> if server-side probe fails. Pending unlocks dashboard with warning.
+        Skip this step if you only need fast integration. Use it when you want to route traffic to your own runtime domain.
       </p>
       <p v-if="runtimeError" class="muted">{{ runtimeError }}</p>
 
@@ -766,8 +769,8 @@ onMounted(() => {
         <p><strong>bootstrap.runtimeBaseUrl:</strong> <code>{{ bootstrapResult.runtimeBaseUrl || '-' }}</code></p>
         <p><strong>bootstrap.runtimeSource:</strong> <code>{{ bootstrapResult.runtimeSource || 'customer' }}</code></p>
         <p v-if="bootstrapResult.customerRuntimeBaseUrl"><strong>bootstrap.customerRuntimeBaseUrl:</strong> <code>{{ bootstrapResult.customerRuntimeBaseUrl }}</code></p>
-        <p v-if="usingManagedRuntimeFallback" class="muted">
-          Managed fallback is active. You can integrate now, then fix custom domain later.
+        <p v-if="usingManagedRuntimeRoute" class="muted">
+          Managed runtime route is active. Integration can continue now; custom domain setup can be completed later.
         </p>
         <p><strong>bootstrap.bindStatus:</strong> <code>{{ bootstrapResult.bindStatus || '-' }}</code></p>
         <p><strong>bootstrap.tenantId:</strong> <code>{{ bootstrapResult.tenantId || '-' }}</code></p>
@@ -779,8 +782,8 @@ onMounted(() => {
       <h3>Pass criteria</h3>
       <ul class="checklist">
         <li>Runtime API key is available (generated in Step A or existing key)</li>
-        <li>Domain bind returns <code>verified</code> or <code>pending</code> (Step B)</li>
-        <li>If <code>pending</code>, SDK may auto-switch to managed fallback so integration still works (Step C)</li>
+        <li>SDK bootstrap returns a valid <code>runtimeBaseUrl</code> (Step C)</li>
+        <li>Domain bind (Step B) is optional; if <code>pending</code>, SDK may auto-switch to managed route</li>
         <li>Probe diagnostics show actionable code and next actions (Step B)</li>
         <li>Only <code>verified</code> marks onboarding complete; <code>pending</code> keeps warning banner</li>
       </ul>

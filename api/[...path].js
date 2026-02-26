@@ -37,19 +37,16 @@ const DEFAULT_PLACEMENT_ID = 'chat_from_answer_v1'
 const DEFAULT_KEY_NAME = 'runtime-prod'
 const DEFAULT_RUNTIME_GATEWAY_HOST = 'runtime-gateway.tappy.ai'
 const RUNTIME_VERIFY_TIMEOUT_MS = 8_000
+const RUNTIME_BINDING_STORE_TIMEOUT_MS = 2_500
+const RUNTIME_BINDING_CACHE_TTL_MS = 30_000
 const URL_IN_TEXT_RE = /(https?:\/\/[^\s"'<>]+)/i
 const PROBE_HEADERS_MAX_KEYS = 2
 const PROBE_HEADERS_MAX_BYTES = 2_048
 const DEFAULT_BIND_STATUS = 'pending'
-const MANAGED_FALLBACK_PROBE_CODES = new Set([
-  'EGRESS_BLOCKED',
-  'ENDPOINT_404',
-  'METHOD_405',
-  'UPSTREAM_5XX',
-  'CORS_BLOCKED',
-])
+const UNBOUND_BIND_STATUS = 'unbound'
 
 const runtimeDomainBindings = new Map()
+const runtimeBindingCache = new Map()
 let runtimeDepsOverride = null
 
 function defaultRuntimeDeps() {
@@ -79,6 +76,7 @@ export function setRuntimeDepsForTests(overrides = null) {
 
 export function clearRuntimeDomainBindingsForTests() {
   runtimeDomainBindings.clear()
+  runtimeBindingCache.clear()
 }
 
 function isAllowedProbeHeader(headerName) {
@@ -630,18 +628,23 @@ function computeProbeFinalStatus(serverProbe, browserProbe) {
 }
 
 function makeBindingSnapshot(existing = {}, patch = {}) {
+  const nowIso = new Date().toISOString()
+  const keyHash = cleanText(patch.keyHash || existing.keyHash)
   return {
+    keyHash,
     tenantId: cleanText(patch.tenantId || existing.tenantId),
     runtimeBaseUrl: cleanText(patch.runtimeBaseUrl || existing.runtimeBaseUrl),
     placementId: cleanText(patch.placementId || existing.placementId || DEFAULT_PLACEMENT_ID),
     keyScope: 'tenant',
-    bindStatus: cleanText(patch.bindStatus || existing.bindStatus || DEFAULT_BIND_STATUS),
+    bindStatus: normalizeBindStatus(patch.bindStatus || existing.bindStatus || DEFAULT_BIND_STATUS),
     verifiedAt: cleanText(patch.verifiedAt ?? existing.verifiedAt),
     lastProbeAt: cleanText(patch.lastProbeAt ?? existing.lastProbeAt),
     lastProbeCode: cleanText(patch.lastProbeCode ?? existing.lastProbeCode),
     lastProbeHttpStatus: Number(patch.lastProbeHttpStatus ?? existing.lastProbeHttpStatus ?? 0) || 0,
     probeHeadersEncrypted: cleanText(patch.probeHeadersEncrypted ?? existing.probeHeadersEncrypted),
     probeDiagnostics: patch.probeDiagnostics || existing.probeDiagnostics || null,
+    createdAt: cleanText(existing.createdAt || patch.createdAt || nowIso),
+    updatedAt: cleanText(patch.updatedAt || nowIso),
   }
 }
 
@@ -650,25 +653,215 @@ function projectBindingForResponse(binding = {}) {
     tenantId: binding.tenantId,
     keyScope: binding.keyScope || 'tenant',
     runtimeBaseUrl: binding.runtimeBaseUrl,
-    bindStatus: binding.bindStatus || DEFAULT_BIND_STATUS,
+    bindStatus: normalizeBindStatus(binding.bindStatus || DEFAULT_BIND_STATUS),
     placementDefaults: {
       placementId: binding.placementId || DEFAULT_PLACEMENT_ID,
     },
   }
 }
 
-function getBoundRuntimeByAuthorization(authorization) {
-  const normalized = normalizeAuthorization(authorization)
-  if (!normalized) return null
-  return runtimeDomainBindings.get(normalized) || null
+function normalizeBindStatus(status) {
+  const normalized = cleanText(status).toLowerCase()
+  if (normalized === 'verified') return 'verified'
+  if (normalized === 'pending') return 'pending'
+  if (normalized === 'failed') return 'failed'
+  if (normalized === UNBOUND_BIND_STATUS) return UNBOUND_BIND_STATUS
+  return DEFAULT_BIND_STATUS
 }
 
-function setBoundRuntimeByAuthorization(authorization, binding) {
-  const normalized = normalizeAuthorization(authorization)
-  if (!normalized) return
-  runtimeDomainBindings.set(normalized, {
-    ...binding,
+function hashRuntimeApiKey(authorization = '') {
+  const token = cleanText(authorization).replace(/^bearer\s+/i, '')
+  if (!token) return ''
+  return createHash('sha256').update(token).digest('hex')
+}
+
+function getBindingCacheKey(authorization = '') {
+  return normalizeAuthorization(authorization)
+}
+
+function readRuntimeBindingCache(authorization = '') {
+  const cacheKey = getBindingCacheKey(authorization)
+  if (!cacheKey) return undefined
+  const cacheEntry = runtimeBindingCache.get(cacheKey)
+  if (!cacheEntry) return undefined
+  if (cacheEntry.expiresAt <= Date.now()) {
+    runtimeBindingCache.delete(cacheKey)
+    return undefined
+  }
+  return cacheEntry.binding
+}
+
+function writeRuntimeBindingCache(authorization = '', binding = null) {
+  const cacheKey = getBindingCacheKey(authorization)
+  if (!cacheKey) return
+  runtimeBindingCache.set(cacheKey, {
+    binding: binding || null,
+    expiresAt: Date.now() + RUNTIME_BINDING_CACHE_TTL_MS,
   })
+}
+
+function buildRuntimeBindingStoreUrl(upstreamBaseUrl = '') {
+  const normalized = cleanText(upstreamBaseUrl)
+  if (!normalized) return ''
+  try {
+    const target = new URL(normalized)
+    const basePath = target.pathname.replace(/\/$/, '')
+    target.pathname = basePath.endsWith('/api')
+      ? `${basePath}/v1/public/runtime-domain/binding`
+      : `${basePath}/api/v1/public/runtime-domain/binding`
+    target.search = ''
+    target.hash = ''
+    return target.toString()
+  } catch {
+    return ''
+  }
+}
+
+function normalizeRuntimeBindingStorePayload(payload = {}) {
+  const source = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload
+    : {}
+  const candidate = source.binding && typeof source.binding === 'object' && !Array.isArray(source.binding)
+    ? source.binding
+    : source
+
+  const hasUsefulFields = Boolean(
+    cleanText(candidate.runtimeBaseUrl)
+    || cleanText(candidate.tenantId)
+    || cleanText(candidate.placementId)
+    || cleanText(candidate.bindStatus),
+  )
+  if (!hasUsefulFields) return null
+  return makeBindingSnapshot({}, candidate)
+}
+
+async function readRuntimeBindingFromStore(authorization = '') {
+  const normalizedAuthorization = normalizeAuthorization(authorization)
+  const upstreamBaseUrl = resolveUpstreamBaseUrl()
+  const targetUrl = buildRuntimeBindingStoreUrl(upstreamBaseUrl)
+  if (!normalizedAuthorization || !targetUrl) return { ok: false, binding: null }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort('Runtime binding store read timeout')
+  }, RUNTIME_BINDING_STORE_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: 'GET',
+      headers: {
+        authorization: normalizedAuthorization,
+        accept: 'application/json',
+      },
+      signal: controller.signal,
+    })
+
+    if (response.status === 404) return { ok: true, binding: null }
+    if (!response.ok) return { ok: false, binding: null }
+
+    const payload = await readJsonResponse(response)
+    const binding = normalizeRuntimeBindingStorePayload(payload || {})
+    return { ok: true, binding }
+  } catch {
+    return { ok: false, binding: null }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function writeRuntimeBindingToStore(authorization = '', binding = null) {
+  const normalizedAuthorization = normalizeAuthorization(authorization)
+  if (!normalizedAuthorization || !binding) return { ok: false, binding: null }
+
+  const upstreamBaseUrl = resolveUpstreamBaseUrl()
+  const targetUrl = buildRuntimeBindingStoreUrl(upstreamBaseUrl)
+  if (!targetUrl) return { ok: false, binding: null }
+
+  const snapshot = makeBindingSnapshot(binding, {
+    keyHash: cleanText(binding.keyHash || hashRuntimeApiKey(normalizedAuthorization)),
+    updatedAt: new Date().toISOString(),
+  })
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort('Runtime binding store write timeout')
+  }, RUNTIME_BINDING_STORE_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: 'PUT',
+      headers: {
+        authorization: normalizedAuthorization,
+        'content-type': 'application/json; charset=utf-8',
+        accept: 'application/json',
+      },
+      body: JSON.stringify({
+        binding: snapshot,
+      }),
+      signal: controller.signal,
+    })
+
+    if (!response.ok) return { ok: false, binding: snapshot }
+    const payload = await readJsonResponse(response)
+    const normalized = normalizeRuntimeBindingStorePayload(payload || {})
+    return { ok: true, binding: normalized || snapshot }
+  } catch {
+    return { ok: false, binding: snapshot }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function getRuntimeBindingByAuthorization(authorization = '', options = {}) {
+  const normalizedAuthorization = normalizeAuthorization(authorization)
+  if (!normalizedAuthorization) return null
+
+  const cached = readRuntimeBindingCache(normalizedAuthorization)
+  if (cached !== undefined) return cached || null
+
+  const localBinding = runtimeDomainBindings.get(normalizedAuthorization) || null
+  const preferStore = options?.preferStore !== false
+
+  if (!preferStore) {
+    writeRuntimeBindingCache(normalizedAuthorization, localBinding)
+    return localBinding
+  }
+
+  const storeResult = await readRuntimeBindingFromStore(normalizedAuthorization)
+  if (storeResult.ok) {
+    const binding = storeResult.binding || localBinding || null
+    if (binding) {
+      runtimeDomainBindings.set(normalizedAuthorization, binding)
+    }
+    writeRuntimeBindingCache(normalizedAuthorization, binding)
+    return binding
+  }
+
+  writeRuntimeBindingCache(normalizedAuthorization, localBinding)
+  return localBinding
+}
+
+async function setRuntimeBindingByAuthorization(authorization = '', binding = null, options = {}) {
+  const normalizedAuthorization = normalizeAuthorization(authorization)
+  if (!normalizedAuthorization || !binding) return null
+
+  const currentBinding = runtimeDomainBindings.get(normalizedAuthorization) || {}
+  const snapshot = makeBindingSnapshot(currentBinding, {
+    ...binding,
+    keyHash: cleanText(binding.keyHash || currentBinding.keyHash || hashRuntimeApiKey(normalizedAuthorization)),
+    updatedAt: new Date().toISOString(),
+  })
+
+  runtimeDomainBindings.set(normalizedAuthorization, snapshot)
+  writeRuntimeBindingCache(normalizedAuthorization, snapshot)
+
+  if (options?.persist === false) return snapshot
+
+  const storeResult = await writeRuntimeBindingToStore(normalizedAuthorization, snapshot)
+  const persisted = storeResult.binding || snapshot
+  runtimeDomainBindings.set(normalizedAuthorization, persisted)
+  writeRuntimeBindingCache(normalizedAuthorization, persisted)
+  return persisted
 }
 
 export function normalizeUpstreamBaseUrl(rawValue) {
@@ -745,13 +938,6 @@ function shouldEnableManagedRuntimeFallback(env = process.env) {
   return cleanText(env?.MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK) !== '0'
 }
 
-function shouldUseManagedRuntimeFallback(binding = {}) {
-  const bindStatus = cleanText(binding?.bindStatus || DEFAULT_BIND_STATUS).toLowerCase()
-  if (bindStatus === 'verified') return false
-  const probeCode = cleanText(binding?.lastProbeCode).toUpperCase()
-  return MANAGED_FALLBACK_PROBE_CODES.has(probeCode)
-}
-
 function buildManagedBidTargetUrl(upstreamBaseUrl) {
   const normalizedUpstreamBaseUrl = cleanText(upstreamBaseUrl)
   if (!normalizedUpstreamBaseUrl) return ''
@@ -766,6 +952,86 @@ function buildManagedBidTargetUrl(upstreamBaseUrl) {
     return target.toString()
   } catch {
     return ''
+  }
+}
+
+function buildRuntimeRouteFailureDetails(binding = {}) {
+  const bindStatus = normalizeBindStatus(binding?.bindStatus || UNBOUND_BIND_STATUS)
+  return {
+    bindStatus,
+    nextActions: bindStatus === UNBOUND_BIND_STATUS
+      ? [
+        'Set MEDIATION_MANAGED_RUNTIME_BASE_URL to enable default managed routing for unbound API keys.',
+        'Or bind a custom runtime domain via /api/v1/public/runtime-domain/verify-and-bind.',
+      ]
+      : [
+        'Set MEDIATION_MANAGED_RUNTIME_BASE_URL to allow managed fallback for non-verified bindings.',
+        'Run runtime-domain probe and fix the reported probe error.',
+      ],
+  }
+}
+
+function resolveRuntimeRoute(binding = null) {
+  const resolvedBinding = binding || null
+  const bindStatus = normalizeBindStatus(resolvedBinding?.bindStatus || UNBOUND_BIND_STATUS)
+  const customerRuntimeBaseUrl = cleanText(resolvedBinding?.runtimeBaseUrl)
+  const managedFallbackEnabled = shouldEnableManagedRuntimeFallback()
+  const managedRuntimeBaseUrl = managedFallbackEnabled
+    ? resolveManagedRuntimeBaseUrl()
+    : ''
+
+  if (bindStatus === 'verified' && customerRuntimeBaseUrl) {
+    return {
+      ok: true,
+      runtimeSource: 'customer',
+      runtimeBaseUrl: customerRuntimeBaseUrl,
+      customerRuntimeBaseUrl,
+      bindStatus: 'verified',
+      binding: resolvedBinding,
+    }
+  }
+
+  if (resolvedBinding && bindStatus !== 'verified') {
+    if (managedRuntimeBaseUrl) {
+      return {
+        ok: true,
+        runtimeSource: 'managed_fallback',
+        runtimeBaseUrl: managedRuntimeBaseUrl,
+        customerRuntimeBaseUrl: customerRuntimeBaseUrl || undefined,
+        bindStatus,
+        binding: resolvedBinding,
+      }
+    }
+    const failureDetails = buildRuntimeRouteFailureDetails(resolvedBinding)
+    return {
+      ok: false,
+      code: 'MANAGED_RUNTIME_NOT_CONFIGURED',
+      message: 'Managed runtime fallback is not configured for this API key.',
+      bindStatus: failureDetails.bindStatus,
+      nextActions: failureDetails.nextActions,
+      binding: resolvedBinding,
+    }
+  }
+
+  if (managedRuntimeBaseUrl) {
+    return {
+      ok: true,
+      runtimeSource: 'managed_default',
+      runtimeBaseUrl: managedRuntimeBaseUrl,
+      customerRuntimeBaseUrl: '',
+      bindStatus: UNBOUND_BIND_STATUS,
+      binding: null,
+    }
+  }
+
+  const failureDetails = buildRuntimeRouteFailureDetails({})
+  return {
+    ok: false,
+    code: 'MANAGED_RUNTIME_NOT_CONFIGURED',
+    message: 'Managed runtime default route is not configured for this API key.',
+    bindStatus: failureDetails.bindStatus,
+    nextActions: failureDetails.nextActions,
+    binding: null,
   }
 }
 
@@ -1217,7 +1483,7 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
     checks.tlsOk = tlsChecks.tlsOk
     checks.connectOk = tlsChecks.connectOk
 
-    const existingBinding = getBoundRuntimeByAuthorization(authorization) || {}
+    const existingBinding = await getRuntimeBindingByAuthorization(authorization) || {}
     const pendingBinding = makeBindingSnapshot(existingBinding, {
       tenantId: existingBinding.tenantId || tenantId,
       runtimeBaseUrl,
@@ -1227,7 +1493,7 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
       lastProbeAt: new Date().toISOString(),
       probeHeadersEncrypted: encodeProbeHeaders(probeHeaders),
     })
-    setBoundRuntimeByAuthorization(authorization, pendingBinding)
+    await setRuntimeBindingByAuthorization(authorization, pendingBinding)
 
     let serverProbe
     try {
@@ -1249,7 +1515,7 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
           serverProbe,
         },
       })
-      setBoundRuntimeByAuthorization(authorization, updatedPendingBinding)
+      await setRuntimeBindingByAuthorization(authorization, updatedPendingBinding)
       const checksWithProbe = applyProbeStatusToChecks(checks, serverProbe)
       sendJson(res, 200, withProbeCompatibility({
         status: 'pending',
@@ -1276,7 +1542,7 @@ async function handleRuntimeDomainVerifyAndBind(req, res) {
         serverProbe,
       },
     })
-    setBoundRuntimeByAuthorization(authorization, verifiedBinding)
+    await setRuntimeBindingByAuthorization(authorization, verifiedBinding)
 
     sendJson(res, 200, withProbeCompatibility({
       status: 'verified',
@@ -1327,7 +1593,7 @@ async function handleRuntimeDomainProbe(req, res) {
     return
   }
 
-  const binding = getBoundRuntimeByAuthorization(authorization) || {}
+  const binding = await getRuntimeBindingByAuthorization(authorization) || {}
   const normalizedDomain = cleanText(payload?.domain)
     ? normalizeRuntimeDomain(payload?.domain)
     : null
@@ -1417,7 +1683,7 @@ async function handleRuntimeDomainProbe(req, res) {
       finalCode: failureCode || 'VERIFIED',
     },
   })
-  setBoundRuntimeByAuthorization(authorization, nextBinding)
+  await setRuntimeBindingByAuthorization(authorization, nextBinding)
 
   const response = withProbeCompatibility({
     status: decision.status,
@@ -1441,7 +1707,121 @@ async function handleRuntimeDomainProbe(req, res) {
   sendJson(res, 200, response)
 }
 
-function handleSdkBootstrap(req, res) {
+function buildRuntimeRouteError(route = {}, requestId = '') {
+  return {
+    error: {
+      code: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
+      message: cleanText(route.message || 'No runtime route is available for this API key.'),
+      requestId: cleanText(requestId),
+      details: {
+        bindStatus: normalizeBindStatus(route.bindStatus || UNBOUND_BIND_STATUS),
+        nextActions: Array.isArray(route.nextActions) ? route.nextActions : [],
+      },
+    },
+  }
+}
+
+function pickNoFillAction(route = {}, fallbackMessage = '') {
+  if (Array.isArray(route.nextActions) && route.nextActions.length > 0) {
+    return cleanText(route.nextActions[0])
+  }
+  return cleanText(fallbackMessage)
+}
+
+function buildNoFillResponse(input = {}) {
+  return {
+    filled: false,
+    reasonCode: cleanText(input.reasonCode || 'NO_FILL'),
+    reasonMessage: cleanText(input.reasonMessage || 'Ad request returned no fill.'),
+    nextAction: cleanText(input.nextAction),
+    traceId: cleanText(input.traceId),
+    runtimeSource: cleanText(input.runtimeSource || 'unknown'),
+  }
+}
+
+async function requestRuntimeBid(input = {}) {
+  const deps = input.deps || getRuntimeDeps()
+  const targetUrl = cleanText(input.targetUrl)
+  const requestBody = input.requestBody
+  const headers = input.headers || {}
+  const usingManagedRuntime = input.usingManagedRuntime === true
+
+  try {
+    const upstreamResponse = await deps.fetch(targetUrl, {
+      method: 'POST',
+      headers,
+      body: requestBody,
+    })
+
+    const contentType = cleanText(upstreamResponse.headers.get('content-type')).toLowerCase()
+    const status = Number(upstreamResponse.status || 500)
+    const responseHeaders = stripResponseHopByHopHeaders(
+      Object.fromEntries(upstreamResponse.headers.entries()),
+    )
+
+    if (!contentType.includes('application/json')) {
+      return {
+        ok: true,
+        passthrough: true,
+        status,
+        contentType: contentType || 'application/octet-stream',
+        responseHeaders,
+        buffer: Buffer.from(await upstreamResponse.arrayBuffer()),
+      }
+    }
+
+    const jsonPayload = await upstreamResponse.json().catch(() => null)
+    if (!jsonPayload || typeof jsonPayload !== 'object') {
+      return {
+        ok: false,
+        status: 502,
+        errorCode: 'BID_INVALID_RESPONSE',
+        errorMessage: 'Runtime bid response is not valid JSON.',
+      }
+    }
+
+    if (jsonPayload.filled === false) {
+      return {
+        ok: false,
+        status,
+        errorCode: 'UPSTREAM_NO_FILL',
+        errorMessage: 'Runtime bid response returned filled=false.',
+        upstreamPayload: jsonPayload,
+      }
+    }
+
+    const { payload: normalizedPayload, landingUrl } = normalizeBidPayload(jsonPayload)
+    if (!landingUrl) {
+      return {
+        ok: false,
+        status: 502,
+        errorCode: 'BID_INVALID_RESPONSE',
+        errorMessage: 'Runtime bid response does not include landingUrl.',
+        upstreamPayload: jsonPayload,
+      }
+    }
+
+    return {
+      ok: true,
+      passthrough: false,
+      status,
+      payload: normalizedPayload,
+      landingUrl,
+      responseHeaders,
+    }
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      errorCode: usingManagedRuntime ? 'MANAGED_RUNTIME_UNAVAILABLE' : 'NETWORK_BLOCKED',
+      errorMessage: usingManagedRuntime
+        ? 'Failed to reach managed runtime /api/v2/bid.'
+        : 'Failed to reach runtime domain /api/v2/bid.',
+    }
+  }
+}
+
+async function handleSdkBootstrap(req, res) {
   const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
   if (!authorization) {
     sendJson(res, 401, {
@@ -1453,36 +1833,26 @@ function handleSdkBootstrap(req, res) {
     return
   }
 
-  const binding = getBoundRuntimeByAuthorization(authorization)
-  if (!binding) {
-    sendJson(res, 404, {
-      error: {
-        code: 'RUNTIME_DOMAIN_NOT_BOUND',
-        message: 'Runtime domain is not bound for this API key.',
-      },
-    })
+  const binding = await getRuntimeBindingByAuthorization(authorization)
+  const route = resolveRuntimeRoute(binding)
+  if (!route.ok) {
+    sendJson(res, 503, buildRuntimeRouteError(route, createRequestId('req_runtime_route')))
     return
   }
 
-  let runtimeBaseUrl = cleanText(binding.runtimeBaseUrl)
-  let runtimeSource = 'customer'
-  const customerRuntimeBaseUrl = runtimeBaseUrl
-
-  if (shouldEnableManagedRuntimeFallback() && shouldUseManagedRuntimeFallback(binding)) {
-    const managedRuntimeBaseUrl = resolveManagedRuntimeBaseUrl()
-    if (managedRuntimeBaseUrl) {
-      runtimeBaseUrl = managedRuntimeBaseUrl
-      runtimeSource = 'managed_fallback'
-    }
-  }
+  const projectedBinding = binding
+    ? projectBindingForResponse(binding)
+    : projectBindingForResponse(makeBindingSnapshot({}, {
+      bindStatus: UNBOUND_BIND_STATUS,
+    }))
 
   sendJson(res, 200, {
-    ...projectBindingForResponse(binding),
-    runtimeBaseUrl,
-    runtimeSource,
-    customerRuntimeBaseUrl,
-    lastProbeCode: cleanText(binding.lastProbeCode),
-    bindStatus: cleanText(binding.bindStatus || DEFAULT_BIND_STATUS),
+    ...projectedBinding,
+    runtimeBaseUrl: route.runtimeBaseUrl,
+    runtimeSource: route.runtimeSource,
+    customerRuntimeBaseUrl: route.customerRuntimeBaseUrl || undefined,
+    lastProbeCode: cleanText(binding?.lastProbeCode),
+    bindStatus: route.bindStatus,
   })
 }
 
@@ -1508,14 +1878,10 @@ async function handleRuntimeBidProxy(req, res) {
     return
   }
 
-  const binding = getBoundRuntimeByAuthorization(authorization)
-  if (!binding) {
-    sendJson(res, 404, {
-      error: {
-        code: 'RUNTIME_DOMAIN_NOT_BOUND',
-        message: 'Runtime domain is not bound for this API key.',
-      },
-    })
+  const binding = await getRuntimeBindingByAuthorization(authorization)
+  const route = resolveRuntimeRoute(binding)
+  if (!route.ok) {
+    sendJson(res, 503, buildRuntimeRouteError(route, createRequestId('req_runtime_route')))
     return
   }
 
@@ -1524,87 +1890,108 @@ async function handleRuntimeBidProxy(req, res) {
   const headers = buildUpstreamHeaders(req)
   headers.authorization = authorization
 
-  const directRuntimeUrl = cleanText(binding.runtimeBaseUrl)
-  const canUseManagedFallback = (
-    shouldEnableManagedRuntimeFallback()
-    && shouldUseManagedRuntimeFallback(binding)
-  )
+  const targetUrl = `${cleanText(route.runtimeBaseUrl)}/api/v2/bid`
+  const bidResult = await requestRuntimeBid({
+    deps,
+    targetUrl,
+    requestBody,
+    headers,
+    usingManagedRuntime: route.runtimeSource.startsWith('managed'),
+  })
 
-  const managedRuntimeBaseUrl = canUseManagedFallback ? resolveManagedRuntimeBaseUrl() : ''
-  const managedTargetUrl = canUseManagedFallback
-    ? buildManagedBidTargetUrl(managedRuntimeBaseUrl)
-    : ''
-  const targetUrl = managedTargetUrl || (directRuntimeUrl ? `${directRuntimeUrl}/api/v2/bid` : '')
-  const usingManagedFallback = Boolean(managedTargetUrl)
-
-  if (!targetUrl) {
-    sendJson(res, 404, {
+  if (!bidResult.ok) {
+    res.setHeader('x-tappy-runtime-source', route.runtimeSource)
+    sendJson(res, Number(bidResult.status || 502), {
       error: {
-        code: 'RUNTIME_DOMAIN_NOT_BOUND',
-        message: 'Runtime domain is not bound for this API key.',
+        code: cleanText(bidResult.errorCode || 'NETWORK_BLOCKED'),
+        message: cleanText(bidResult.errorMessage || 'Failed to execute runtime bid request.'),
       },
     })
     return
   }
 
-  try {
-    const upstreamResponse = await deps.fetch(targetUrl, {
-      method: 'POST',
-      headers,
-      body: requestBody,
-    })
-
-    const contentType = cleanText(upstreamResponse.headers.get('content-type')).toLowerCase()
-    const status = Number(upstreamResponse.status || 500)
-    if (!contentType.includes('application/json')) {
-      const passthroughBuffer = Buffer.from(await upstreamResponse.arrayBuffer())
-      res.statusCode = status
-      res.setHeader('content-type', contentType || 'application/octet-stream')
-      res.end(passthroughBuffer)
-      return
-    }
-
-    const jsonPayload = await upstreamResponse.json().catch(() => null)
-    if (!jsonPayload || typeof jsonPayload !== 'object') {
-      sendJson(res, 502, {
-        error: {
-          code: 'BID_INVALID_RESPONSE',
-          message: 'Runtime bid response is not valid JSON.',
-        },
-      })
-      return
-    }
-
-    const { payload: normalizedPayload, landingUrl } = normalizeBidPayload(jsonPayload)
-    if (!landingUrl) {
-      sendJson(res, 502, {
-        error: {
-          code: 'BID_INVALID_RESPONSE',
-          message: 'Runtime bid response does not include landingUrl.',
-        },
-      })
-      return
-    }
-
-    const responseHeaders = stripResponseHopByHopHeaders(
-      Object.fromEntries(upstreamResponse.headers.entries()),
-    )
-    res.statusCode = status
-    for (const [key, value] of Object.entries(responseHeaders)) {
+  res.setHeader('x-tappy-runtime-source', route.runtimeSource)
+  if (bidResult.passthrough) {
+    res.statusCode = Number(bidResult.status || 200)
+    for (const [key, value] of Object.entries(bidResult.responseHeaders || {})) {
       res.setHeader(key, value)
     }
-    res.setHeader('content-type', 'application/json; charset=utf-8')
-    res.end(JSON.stringify(normalizedPayload))
-  } catch {
-    sendJson(res, 502, {
-      error: {
-        code: usingManagedFallback ? 'MANAGED_RUNTIME_UNAVAILABLE' : 'NETWORK_BLOCKED',
-        message: usingManagedFallback
-          ? 'Failed to reach managed runtime /api/v2/bid.'
-          : 'Failed to reach runtime domain /api/v2/bid.',
-      },
-    })
+    res.setHeader('content-type', cleanText(bidResult.contentType) || 'application/octet-stream')
+    res.end(bidResult.buffer)
+    return
   }
+
+  res.statusCode = Number(bidResult.status || 200)
+  for (const [key, value] of Object.entries(bidResult.responseHeaders || {})) {
+    res.setHeader(key, value)
+  }
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.end(JSON.stringify(bidResult.payload))
+}
+
+async function handleAdBid(req, res) {
+  const traceId = createRequestId('req_ad_bid')
+  const authorization = normalizeAuthorization(readHeaderValue(req.headers, 'authorization'))
+  if (!authorization) {
+    sendJson(res, 200, buildNoFillResponse({
+      traceId,
+      reasonCode: 'AUTH_FORBIDDEN',
+      reasonMessage: 'Authorization header is required.',
+      nextAction: 'Set Authorization header: Bearer <MEDIATION_API_KEY>.',
+      runtimeSource: 'unknown',
+    }))
+    return
+  }
+
+  const binding = await getRuntimeBindingByAuthorization(authorization)
+  const route = resolveRuntimeRoute(binding)
+  if (!route.ok) {
+    const noFill = buildNoFillResponse({
+      traceId,
+      reasonCode: cleanText(route.code || 'RUNTIME_ROUTE_UNAVAILABLE'),
+      reasonMessage: cleanText(route.message || 'No runtime route available for this API key.'),
+      nextAction: pickNoFillAction(route),
+      runtimeSource: 'none',
+    })
+    console.warn('[ad-bid][no-fill]', noFill)
+    sendJson(res, 200, noFill)
+    return
+  }
+
+  const deps = getRuntimeDeps()
+  const requestBody = await readRequestBody(req)
+  const headers = buildUpstreamHeaders(req)
+  headers.authorization = authorization
+
+  const bidResult = await requestRuntimeBid({
+    deps,
+    targetUrl: `${cleanText(route.runtimeBaseUrl)}/api/v2/bid`,
+    requestBody,
+    headers,
+    usingManagedRuntime: route.runtimeSource.startsWith('managed'),
+  })
+
+  if (!bidResult.ok || bidResult.passthrough) {
+    const noFill = buildNoFillResponse({
+      traceId,
+      reasonCode: cleanText(bidResult.errorCode || 'BID_INVALID_RESPONSE'),
+      reasonMessage: cleanText(bidResult.errorMessage || 'Runtime bid response is not valid JSON.'),
+      nextAction: pickNoFillAction(route, 'Retry later or verify runtime route health in dashboard diagnostics.'),
+      runtimeSource: route.runtimeSource,
+    })
+    console.warn('[ad-bid][no-fill]', noFill)
+    sendJson(res, 200, noFill)
+    return
+  }
+
+  sendJson(res, 200, {
+    filled: true,
+    traceId,
+    runtimeSource: route.runtimeSource,
+    landingUrl: bidResult.landingUrl,
+    requestId: cleanText(bidResult.payload?.requestId || traceId),
+    bid: bidResult.payload,
+  })
 }
 
 export default async function dashboardApiProxyHandler(req, res) {
@@ -1620,11 +2007,15 @@ export default async function dashboardApiProxyHandler(req, res) {
     return
   }
   if (pathname === '/api/v1/public/sdk/bootstrap' && method === 'GET') {
-    handleSdkBootstrap(req, res)
+    await handleSdkBootstrap(req, res)
     return
   }
   if (pathname === '/api/v2/bid' && method === 'POST') {
     await handleRuntimeBidProxy(req, res)
+    return
+  }
+  if (pathname === '/api/ad/bid' && method === 'POST') {
+    await handleAdBid(req, res)
     return
   }
 
