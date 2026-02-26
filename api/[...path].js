@@ -919,9 +919,12 @@ function normalizePublicBaseUrl(rawValue) {
 
 export function resolveManagedRuntimeBaseUrl(env = process.env) {
   const explicit = normalizePublicBaseUrl(env.MEDIATION_MANAGED_RUNTIME_BASE_URL)
-  if (!explicit) return ''
+  const fallback = explicit || normalizeUpstreamBaseUrl(
+    env.MEDIATION_CONTROL_PLANE_API_BASE_URL || env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
+  )
+  if (!fallback) return ''
   try {
-    const parsed = new URL(explicit)
+    const parsed = new URL(fallback)
     const pathname = parsed.pathname.replace(/\/$/, '')
     parsed.pathname = pathname.endsWith('/api')
       ? (pathname.slice(0, -4) || '/')

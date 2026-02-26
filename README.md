@@ -59,7 +59,7 @@ npm run build
 - `MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK` (optional)
   Default: `1` (enabled). Set to `0` to disable managed runtime fallback/default routing.
 - `MEDIATION_MANAGED_RUNTIME_BASE_URL` (optional)
-  Explicit managed runtime base URL for fallback/default mode. If unset, unbound keys cannot auto-route.
+  Explicit managed runtime base URL for fallback/default mode. If unset, proxy auto-derives from `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
 
 ## Onboarding Contract
 

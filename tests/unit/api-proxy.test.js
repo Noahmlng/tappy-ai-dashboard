@@ -107,10 +107,10 @@ describe('api proxy helpers', () => {
     })).toBe('https://prod.example.com/api')
   })
 
-  it('resolves managed runtime base url only from explicit runtime fallback env', () => {
+  it('resolves managed runtime base url from explicit env or control plane base as fallback', () => {
     expect(resolveManagedRuntimeBaseUrl({
       MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
-    })).toBe('')
+    })).toBe('https://prod.example.com')
 
     expect(resolveManagedRuntimeBaseUrl({
       MEDIATION_MANAGED_RUNTIME_BASE_URL: 'https://runtime-managed.example.com/base',
