@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { appendQuery, controlPlaneClient, getCookieValue } from '../../src/api/control-plane-client'
+import { appendQuery, controlPlaneClient, getCookieValue, setDashboardAccessToken } from '../../src/api/control-plane-client'
 
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -14,6 +14,7 @@ function jsonResponse(payload, status = 200) {
 afterEach(() => {
   vi.restoreAllMocks()
   Reflect.deleteProperty(globalThis, 'document')
+  setDashboardAccessToken('')
 })
 
 describe('control-plane-client helpers', () => {
@@ -62,6 +63,19 @@ describe('control-plane-client runtime behavior', () => {
     const [, options] = fetchMock.mock.calls[0]
     expect(options.method).toBe('GET')
     expect(options.headers['x-csrf-token']).toBeUndefined()
+  })
+
+  it('attaches bearer token when available', async () => {
+    setDashboardAccessToken('dsh_test_token')
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse({ ok: true }))
+
+    await controlPlaneClient.dashboard.getState({})
+
+    const [, options] = fetchMock.mock.calls[0]
+    expect(options.headers.Authorization).toBe('Bearer dsh_test_token')
   })
 
   it('normalizes error payloads', async () => {

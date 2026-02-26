@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 
-import { controlPlaneClient } from '../api/control-plane-client'
+import { controlPlaneClient, setDashboardAccessToken } from '../api/control-plane-client'
 import { setScope } from './scope-state'
 
 function applyScopeFromUser(user = {}, scope = {}) {
@@ -26,12 +26,14 @@ export const authState = reactive({
 function applyAuthPayload(payload = {}) {
   const user = payload?.user && typeof payload.user === 'object' ? payload.user : null
   const session = payload?.session && typeof payload.session === 'object' ? payload.session : null
+  const accessToken = String(session?.accessToken || session?.access_token || '').trim()
 
   authState.user = user
   authState.session = session
   authState.authenticated = Boolean(user)
   authState.error = ''
   authState.ready = true
+  setDashboardAccessToken(accessToken)
 
   if (user) {
     applyScopeFromUser(user, payload?.scope || {})
@@ -44,6 +46,7 @@ function clearAuthState() {
   authState.authenticated = false
   authState.error = ''
   authState.ready = true
+  setDashboardAccessToken('')
 }
 
 export async function hydrateAuthSession() {

@@ -1,4 +1,6 @@
 const API_BASE_URL = '/api'
+const DASHBOARD_ACCESS_TOKEN_STORAGE_KEY = 'dashboard_access_token'
+let dashboardAccessToken = ''
 
 export function appendQuery(path, query) {
   const entries = Object.entries(query || {}).filter(([, value]) => (
@@ -52,9 +54,51 @@ function shouldAttachCsrfToken(method) {
   return !['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
 }
 
+function readStoredDashboardAccessToken() {
+  if (typeof window === 'undefined' || !window?.localStorage) return ''
+  try {
+    return String(window.localStorage.getItem(DASHBOARD_ACCESS_TOKEN_STORAGE_KEY) || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+function getDashboardAccessToken() {
+  if (dashboardAccessToken) return dashboardAccessToken
+  const stored = readStoredDashboardAccessToken()
+  if (stored) {
+    dashboardAccessToken = stored
+  }
+  return dashboardAccessToken
+}
+
+export function setDashboardAccessToken(value = '') {
+  const nextValue = String(value || '').trim()
+  dashboardAccessToken = nextValue
+
+  if (typeof window === 'undefined' || !window?.localStorage) return
+  try {
+    if (nextValue) {
+      window.localStorage.setItem(DASHBOARD_ACCESS_TOKEN_STORAGE_KEY, nextValue)
+    } else {
+      window.localStorage.removeItem(DASHBOARD_ACCESS_TOKEN_STORAGE_KEY)
+    }
+  } catch {
+    // storage access can fail in private contexts; keep in-memory token only
+  }
+}
+
 function createRequestHeaders(method, headers = {}) {
   const nextHeaders = {
     ...headers,
+  }
+
+  const hasAuthorization = Object.keys(nextHeaders).some((key) => key.toLowerCase() === 'authorization')
+  if (!hasAuthorization) {
+    const accessToken = getDashboardAccessToken()
+    if (accessToken) {
+      nextHeaders.Authorization = `Bearer ${accessToken}`
+    }
   }
 
   if (!shouldAttachCsrfToken(method)) return nextHeaders
