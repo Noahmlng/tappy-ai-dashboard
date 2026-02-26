@@ -2,7 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
-import { authState, isOnboardingUnlocked, logoutDashboardUser } from './state/auth-state'
+import { authState, logoutDashboardUser } from './state/auth-state'
 
 const route = useRoute()
 const router = useRouter()
@@ -25,23 +25,13 @@ const advancedNavItems = [
 
 const navItems = computed(() => {
   if (!authState.authenticated) return []
-  if (!isOnboardingUnlocked()) {
-    return [
-      { to: '/onboarding', label: 'Onboarding', icon: 'flash' },
-    ]
-  }
   return advancedNavExpanded.value
     ? [...coreNavItems, ...advancedNavItems]
     : coreNavItems
 })
 
-const showRuntimePendingBanner = computed(() => (
-  authState.authenticated
-  && !isPublicRoute.value
-  && String(authState.onboarding.status || '').toLowerCase() === 'pending'
-))
 const showAdvancedNavToggle = computed(() => (
-  authState.authenticated && isOnboardingUnlocked()
+  authState.authenticated
 ))
 
 function toggleAdvancedNav() {
@@ -258,17 +248,6 @@ watch(
     </aside>
 
     <main class="content-pane" :class="{ 'auth-content': isPublicRoute }">
-      <article v-if="showRuntimePendingBanner" class="panel runtime-warning-banner">
-        <div class="panel-toolbar">
-          <h3>Runtime Not Ready</h3>
-          <RouterLink class="button button-secondary" to="/onboarding">
-            Fix runtime probe
-          </RouterLink>
-        </div>
-        <p class="muted">
-          Runtime domain is bound, but live probe is still failing. You can continue in dashboard while fixing runtime connectivity.
-        </p>
-      </article>
       <RouterView />
     </main>
   </div>

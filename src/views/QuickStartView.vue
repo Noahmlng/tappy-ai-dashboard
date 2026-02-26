@@ -1,113 +1,34 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 
-import { controlPlaneClient } from '../api/control-plane-client'
 import { apiKeysState, clearRevealedSecret, createApiKey, hydrateApiKeys } from '../state/api-keys-state'
-import {
-  authState,
-  hydrateAuthSession,
-  markOnboardingPending,
-  markOnboardingVerified,
-} from '../state/auth-state'
+import { authState, markOnboardingVerified } from '../state/auth-state'
 import { scopeState } from '../state/scope-state'
+
+const placementId = 'chat_from_answer_v1'
 
 const copyState = ref('')
 const keyLoading = ref(false)
 const keyError = ref('')
-
-const bindLoading = ref(false)
-const liveProbeLoading = ref(false)
-const browserProbeLoading = ref(false)
-const runtimeError = ref('')
-
-const runtimeResult = ref(null)
-const bootstrapResult = ref(null)
-const domainInput = ref('')
+const bidLoading = ref(false)
+const bidError = ref('')
+const bidResult = ref(null)
 const runtimeApiKeyInput = ref('')
-const probeHeaderKey1 = ref('')
-const probeHeaderValue1 = ref('')
-const probeHeaderKey2 = ref('')
-const probeHeaderValue2 = ref('')
-const BROWSER_PROBE_TIMEOUT_MS = 8_000
-const RUNTIME_DOMAIN_STORAGE_KEY = 'onboarding.runtime_domain'
-
-const placementId = 'chat_from_answer_v1'
 
 const rows = computed(() => (Array.isArray(apiKeysState.items) ? apiKeysState.items : []))
 const latestKey = computed(() => rows.value[0] || null)
 const revealedSecret = computed(() => String(apiKeysState.meta.lastRevealedSecret || '').trim())
-const hasRuntimeApiKey = computed(() => Boolean(resolveRuntimeApiKey()))
-
+const accountId = computed(() => String(scopeState.accountId || authState.user?.accountId || '').trim())
+const appId = computed(() => String(scopeState.appId || authState.user?.appId || '').trim())
 const onboardingStatus = computed(() => String(authState.onboarding.status || 'locked').toLowerCase())
-const onboardingStatusClass = computed(() => {
-  if (onboardingStatus.value === 'verified') return 'meta-pill good'
-  if (onboardingStatus.value === 'pending') return 'meta-pill warn'
-  return 'meta-pill warn'
-})
-const onboardingStatusLabel = computed(() => {
-  if (onboardingStatus.value === 'verified') return 'Verified'
-  if (onboardingStatus.value === 'pending') return 'Pending'
-  return 'Locked'
-})
 
-const runtimeStatus = computed(() => String(runtimeResult.value?.status || '').trim().toLowerCase())
-const runtimeBindStage = computed(() => String(runtimeResult.value?.bindStage || '').trim().toLowerCase())
-const runtimeProbeCode = computed(() => (
-  String(
-    runtimeResult.value?.probeResult?.code
-    || runtimeResult.value?.failureCode
-    || runtimeResult.value?.serverProbe?.code
-    || '',
-  ).trim().toUpperCase()
+const envSnippet = computed(() => (
+  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`
 ))
-const runtimeProbeDetail = computed(() => (
-  String(
-    runtimeResult.value?.probeResult?.detail
-    || runtimeResult.value?.serverProbe?.detail
-    || '',
-  ).trim()
-))
-const runtimeBindStateLabel = computed(() => {
-  if (runtimeStatus.value === 'verified') return 'Verified'
-  if (runtimeStatus.value === 'pending') return 'Bound (Pending)'
-  if (runtimeStatus.value === 'failed') return 'Rejected'
-  return '-'
-})
-const showLiveProbeButton = computed(() => (
-  hasRuntimeApiKey.value && (
-    onboardingStatus.value === 'pending'
-    || (runtimeStatus.value !== '' && runtimeStatus.value !== 'verified')
-  )
-))
-const showBrowserProbeButton = computed(() => {
-  if (!hasRuntimeApiKey.value) return false
-  if (!runtimeResult.value) return false
-  if (runtimeStatus.value === 'verified') return false
-  if (runtimeResult.value?.serverProbe) {
-    return runtimeResult.value.serverProbe.ok === false
-  }
-  return runtimeStatus.value === 'pending' || runtimeBindStage.value === 'probe_failed'
-})
-
-const HOSTED_BOOTSTRAP_URL = 'https://tappy-ai-dashboard.vercel.app/api/v1/public/sdk/bootstrap'
-
-const envSnippet = computed(() => `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}`)
 
 const sdkSnippet = computed(() => `const apiKey = process.env.MEDIATION_API_KEY;
 
-const bootstrapRes = await fetch('${HOSTED_BOOTSTRAP_URL}', {
-  method: 'GET',
-  headers: {
-    'Authorization': \`Bearer ${'${apiKey}'}\`
-  }
-});
-if (!bootstrapRes.ok) throw new Error(\`bootstrap failed: ${'${bootstrapRes.status}'}\`);
-
-const bootstrap = await bootstrapRes.json();
-const baseUrl = bootstrap.runtimeBaseUrl;
-const placementId = bootstrap.placementDefaults?.placementId || '${placementId}';
-
-const bidRes = await fetch(\`${'${baseUrl}'}/api/v2/bid\`, {
+const bidRes = await fetch('/api/v2/bid', {
   method: 'POST',
   headers: {
     'Authorization': \`Bearer ${'${apiKey}'}\`,
@@ -116,7 +37,7 @@ const bidRes = await fetch(\`${'${baseUrl}'}/api/v2/bid\`, {
   body: JSON.stringify({
     userId: 'session_001',
     chatId: 'session_001',
-    placementId,
+    placementId: '${placementId}',
     messages: [
       { role: 'user', content: 'Recommend waterproof running shoes' },
       { role: 'assistant', content: 'Prioritize grip and breathable waterproof upper.' }
@@ -126,22 +47,13 @@ const bidRes = await fetch(\`${'${baseUrl}'}/api/v2/bid\`, {
 
 if (!bidRes.ok) throw new Error(\`v2/bid failed: ${'${bidRes.status}'}\`);
 const bidJson = await bidRes.json();
-if (!bidJson.landingUrl) throw new Error('landingUrl missing in bid response');
-console.log({ requestId: bidJson.requestId, landingUrl: bidJson.landingUrl });`)
+console.log({ requestId: bidJson.requestId, filled: bidJson.filled, landingUrl: bidJson.landingUrl });
 
-const runtimeEvidence = computed(() => (
-  runtimeResult.value ? JSON.stringify(runtimeResult.value, null, 2) : ''
-))
+// Optional enhancement (not required for MVP):
+// await fetch('/api/v1/sdk/events', { method: 'POST', headers: {...}, body: JSON.stringify({...}) });`)
 
-const bootstrapEvidence = computed(() => (
-  bootstrapResult.value ? JSON.stringify(bootstrapResult.value, null, 2) : ''
-))
-const bootstrapRuntimeSource = computed(() => (
-  String(bootstrapResult.value?.runtimeSource || '').trim().toLowerCase()
-))
-const usingManagedRuntimeRoute = computed(() => (
-  bootstrapRuntimeSource.value === 'managed_fallback'
-  || bootstrapRuntimeSource.value === 'managed_default'
+const bidEvidence = computed(() => (
+  bidResult.value ? JSON.stringify(bidResult.value, null, 2) : ''
 ))
 
 watch(revealedSecret, (value) => {
@@ -150,52 +62,8 @@ watch(revealedSecret, (value) => {
   }
 })
 
-watch(domainInput, (value) => {
-  if (typeof window === 'undefined') return
-  try {
-    const normalized = String(value || '').trim()
-    if (!normalized) {
-      window.localStorage.removeItem(RUNTIME_DOMAIN_STORAGE_KEY)
-      return
-    }
-    window.localStorage.setItem(RUNTIME_DOMAIN_STORAGE_KEY, normalized)
-  } catch {
-    // ignore storage errors
-  }
-})
-
-function normalizeRuntimeBaseUrl(value) {
-  const input = String(value || '').trim()
-  if (!input) return ''
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input)
-    ? input.replace(/\/$/, '')
-    : `https://${input}`
-}
-
 function resolveRuntimeApiKey() {
   return String(runtimeApiKeyInput.value || revealedSecret.value || '').trim()
-}
-
-function buildProbeHeaders() {
-  const entries = []
-  const key1 = String(probeHeaderKey1.value || '').trim().toLowerCase()
-  const value1 = String(probeHeaderValue1.value || '').trim()
-  const key2 = String(probeHeaderKey2.value || '').trim().toLowerCase()
-  const value2 = String(probeHeaderValue2.value || '').trim()
-
-  if (key1 && value1) entries.push([key1, value1])
-  if (key2 && value2) entries.push([key2, value2])
-  return Object.fromEntries(entries)
-}
-
-function hasCookie(name) {
-  const normalizedName = String(name || '').trim()
-  if (!normalizedName || typeof document === 'undefined') return false
-  const source = String(document.cookie || '')
-  return source
-    .split(';')
-    .map((item) => item.trim())
-    .some((item) => item.startsWith(`${normalizedName}=`))
 }
 
 function resolveCreateKeyError(result) {
@@ -215,578 +83,271 @@ function resolveCreateKeyError(result) {
   return message
 }
 
-function logCreateKeyDiagnostics(result, phase) {
-  if (!import.meta.env.DEV) return
-  console.info('[generate-key:diagnostic]', {
-    phase,
-    status: Number(result?.status || 0),
-    code: String(result?.code || ''),
-    requiresLogin: Boolean(result?.requiresLogin),
-    hasDashCsrfCookie: hasCookie('dash_csrf'),
-    hasLocalStorageDashboardToken: typeof window !== 'undefined'
-      ? Boolean(window.localStorage.getItem('dashboard_access_token'))
-      : false,
-    authMode: 'cookie',
-  })
-}
-
-function applyRuntimeOnboardingStatus(status, verifiedAt) {
-  const normalized = String(status || '').trim().toLowerCase()
-  if (normalized === 'verified') {
-    markOnboardingVerified(verifiedAt)
-    return
-  }
-  if (normalized === 'pending') {
-    markOnboardingPending()
-  }
-}
-
-function toRuntimeFailureText(payload = {}, fallback = 'Runtime probe failed.') {
-  const code = String(payload?.failureCode || payload?.probeResult?.code || payload?.serverProbe?.code || '').trim().toUpperCase()
-  const detail = String(
-    payload?.probeResult?.detail
-    || payload?.serverProbe?.detail
-    || payload?.browserProbe?.detail
-    || fallback,
-  ).trim()
-  const runtimeBaseUrl = String(payload?.runtimeBaseUrl || '').trim().toLowerCase()
-
-  if (code === 'ENDPOINT_404') {
-    if (runtimeBaseUrl.includes('vercel.app')) {
-      return '[ENDPOINT_404] Domain is reachable, but POST /api/v2/bid is missing. This looks like a frontend Vercel domain, not a runtime bid API.'
-    }
-    return '[ENDPOINT_404] Domain is reachable, but POST /api/v2/bid is missing.'
-  }
-  if (code === 'CORS_BLOCKED') {
-    return '[CORS_BLOCKED] Browser probe was blocked by CORS preflight. This does not always mean server probe is blocked.'
-  }
-  return code ? `[${code}] ${detail}` : detail
-}
-
-function shouldAutoRunBrowserProbe(payload = {}) {
-  const code = String(
-    payload?.failureCode
-    || payload?.probeResult?.code
-    || payload?.serverProbe?.code
-    || '',
-  ).trim().toUpperCase()
-  if (!code) return false
-  return code === 'EGRESS_BLOCKED' || code === 'UPSTREAM_5XX'
-}
-
-async function refreshBootstrap() {
-  const runtimeApiKey = resolveRuntimeApiKey()
-  if (!runtimeApiKey) return
-  try {
-    const bootstrap = await controlPlaneClient.sdk.bootstrap({
-      apiKey: runtimeApiKey,
-    })
-    bootstrapResult.value = bootstrap
-  } catch {
-    bootstrapResult.value = null
-  }
-}
-
-async function applyRuntimePayload(payload = {}) {
-  runtimeResult.value = payload
-  const status = String(payload?.status || '').trim().toLowerCase()
-  applyRuntimeOnboardingStatus(status, payload?.verifiedAt)
-
-  if (status === 'verified' || status === 'pending') {
-    await refreshBootstrap()
-  }
-
-  if (status === 'verified') {
-    runtimeError.value = ''
-    return
-  }
-
-  if (status === 'pending' && usingManagedRuntimeRoute.value) {
-    runtimeError.value = '[MANAGED_FALLBACK] Custom runtime domain is pending. SDK will use managed runtime automatically so integration can continue.'
-    return
-  }
-
-  runtimeError.value = toRuntimeFailureText(payload, 'Runtime domain is not ready yet.')
-}
-
-function buildBrowserProbePayload(result = {}) {
-  return {
-    ok: Boolean(result.ok),
-    code: String(result.code || '').trim().toUpperCase() || 'EGRESS_BLOCKED',
-    httpStatus: Number(result.httpStatus || 0) || 0,
-    detail: String(result.detail || '').trim(),
-    landingUrl: String(result.landingUrl || '').trim(),
-  }
-}
-
-function isCrossOriginRuntimeBaseUrl(runtimeBaseUrl) {
-  if (typeof window === 'undefined') return false
-  try {
-    return new URL(runtimeBaseUrl).origin !== window.location.origin
-  } catch {
-    return false
-  }
-}
-
-async function runBrowserProbeDirect(runtimeBaseUrl, runtimeApiKey, probeHeaders = {}) {
-  const headers = {
-    ...probeHeaders,
-    Authorization: `Bearer ${runtimeApiKey}`,
-    'Content-Type': 'application/json',
-  }
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    controller.abort()
-  }, BROWSER_PROBE_TIMEOUT_MS)
-
-  try {
-    const response = await fetch(`${runtimeBaseUrl}/api/v2/bid`, {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        userId: 'browser_probe_user',
-        chatId: 'browser_probe_chat',
-        placementId,
-        messages: [
-          { role: 'user', content: 'browser probe' },
-        ],
-      }),
-    })
-
-    const status = Number(response.status || 0)
-    if (!response.ok) {
-      let code = 'EGRESS_BLOCKED'
-      if (status === 404) code = 'ENDPOINT_404'
-      else if (status === 405) code = 'METHOD_405'
-      else if (status === 401 || status === 403) code = 'AUTH_401_403'
-      else if (status >= 500) code = 'UPSTREAM_5XX'
-      return {
-        ok: false,
-        code,
-        httpStatus: status,
-        detail: `Browser probe failed with status ${status}.`,
-      }
-    }
-
-    const payload = await response.json().catch(() => null)
-    if (!payload || typeof payload !== 'object') {
-      return {
-        ok: false,
-        code: 'BID_INVALID_RESPONSE_JSON',
-        httpStatus: status,
-        detail: 'Browser probe response is not valid JSON.',
-      }
-    }
-
-    const landingUrl = String(
-      payload?.landingUrl
-      || payload?.url
-      || payload?.link
-      || payload?.ad?.landingUrl
-      || payload?.ad?.url
-      || payload?.ad?.link
-      || '',
-    ).trim()
-
-    if (!landingUrl) {
-      return {
-        ok: false,
-        code: 'LANDING_URL_MISSING',
-        httpStatus: status,
-        detail: 'Browser probe response has no landing URL.',
-      }
-    }
-
-    return {
-      ok: true,
-      code: 'VERIFIED',
-      httpStatus: status,
-      detail: 'Browser probe succeeded.',
-      landingUrl,
-    }
-  } catch (error) {
-    clearTimeout(timer)
-    if (error instanceof Error && error.name === 'AbortError') {
-      return {
-        ok: false,
-        code: 'EGRESS_BLOCKED',
-        httpStatus: 0,
-        detail: 'Browser probe timed out.',
-      }
-    }
-    const detail = error instanceof Error ? error.message : 'Browser probe network blocked.'
-    if (isCrossOriginRuntimeBaseUrl(runtimeBaseUrl) && /failed to fetch/i.test(detail)) {
-      return {
-        ok: false,
-        code: 'CORS_BLOCKED',
-        httpStatus: 0,
-        detail: 'Browser probe blocked by CORS preflight.',
-      }
-    }
-    return {
-      ok: false,
-      code: 'EGRESS_BLOCKED',
-      httpStatus: 0,
-      detail,
-    }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function syncProbeWithServer({ runBrowserProbe = false, browserProbe = null } = {}) {
-  const domain = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = resolveRuntimeApiKey()
-  const probeHeaders = buildProbeHeaders()
-
-  const payload = await controlPlaneClient.runtimeDomain.probe(
-    {
-      domain: domain || undefined,
-      placementId,
-      probeHeaders,
-      runBrowserProbe,
-      browserProbe,
-    },
-    {
-      apiKey: runtimeApiKey,
-    },
-  )
-
-  await applyRuntimePayload(payload)
-  return payload
-}
-
-async function createFirstKey() {
-  keyLoading.value = true
+async function handleGenerateKey() {
   keyError.value = ''
-  clearRevealedSecret()
-
+  keyLoading.value = true
   try {
-    let result = await createApiKey({})
-    if (!result?.ok && result?.requiresLogin) {
-      logCreateKeyDiagnostics(result, 'first_auth_failure')
-      await hydrateAuthSession()
-      if (authState.authenticated) {
-        result = await createApiKey({})
-      }
-    }
+    const result = await createApiKey({
+      accountId: accountId.value,
+      appId: appId.value,
+      environment: 'prod',
+      name: `runtime-${Date.now()}`,
+    })
 
     if (!result?.ok) {
       keyError.value = resolveCreateKeyError(result)
-      logCreateKeyDiagnostics(result, 'final_failure')
       return
     }
 
-    if (revealedSecret.value) {
-      runtimeApiKeyInput.value = revealedSecret.value
-    }
     await hydrateApiKeys()
+    const latestSecret = String(apiKeysState.meta.lastRevealedSecret || '').trim()
+    if (latestSecret) {
+      runtimeApiKeyInput.value = latestSecret
+    }
+    clearRevealedSecret()
   } catch (error) {
-    keyError.value = error instanceof Error ? error.message : 'Key generation failed'
+    keyError.value = error instanceof Error ? error.message : 'Generate key failed'
   } finally {
     keyLoading.value = false
   }
 }
 
-async function bindRuntimeDomain() {
-  bindLoading.value = true
-  runtimeError.value = ''
-  runtimeResult.value = null
-  bootstrapResult.value = null
+async function handleRunBidCheck() {
+  bidError.value = ''
+  bidResult.value = null
 
-  const runtimeBaseUrl = normalizeRuntimeBaseUrl(domainInput.value)
   const runtimeApiKey = resolveRuntimeApiKey()
-  const probeHeaders = buildProbeHeaders()
-
-  if (!runtimeBaseUrl) {
-    runtimeError.value = 'Runtime domain is required.'
-    bindLoading.value = false
-    return
-  }
   if (!runtimeApiKey) {
-    runtimeError.value = 'Runtime API key is required to validate Authorization.'
-    bindLoading.value = false
+    bidError.value = 'Runtime API key is required before testing /api/v2/bid.'
     return
   }
 
+  bidLoading.value = true
   try {
-    const payload = await controlPlaneClient.runtimeDomain.verifyAndBind(
-      {
-        domain: runtimeBaseUrl,
+    const response = await fetch('/api/v2/bid', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${runtimeApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'onboarding_user_001',
+        chatId: 'onboarding_chat_001',
         placementId,
-        probeHeaders,
-      },
-      {
-        apiKey: runtimeApiKey,
-      },
-    )
+        messages: [
+          { role: 'user', content: 'Recommend running shoes for rainy days' },
+          { role: 'assistant', content: 'Focus on grip and waterproof upper.' },
+        ],
+      }),
+    })
 
-    await applyRuntimePayload(payload)
+    const payload = await response.json().catch(() => ({}))
+    bidResult.value = {
+      httpStatus: response.status,
+      ok: response.ok,
+      ...payload,
+    }
 
-    if (String(payload?.status || '').toLowerCase() === 'pending' && shouldAutoRunBrowserProbe(payload)) {
-      await runBrowserProbe({ silent: true })
+    if (!response.ok) {
+      const errorCode = String(payload?.error?.code || '').trim()
+      const errorMessage = String(payload?.error?.message || '').trim()
+      bidError.value = errorCode ? `[${errorCode}] ${errorMessage}` : (errorMessage || `HTTP ${response.status}`)
+      return
+    }
+
+    if (String(payload?.requestId || '').trim()) {
+      markOnboardingVerified()
     }
   } catch (error) {
-    runtimeError.value = error instanceof Error ? error.message : 'Runtime domain bind failed.'
+    bidError.value = error instanceof Error ? error.message : 'Request /api/v2/bid failed'
   } finally {
-    bindLoading.value = false
+    bidLoading.value = false
   }
 }
 
-async function runLiveProbe() {
-  liveProbeLoading.value = true
-  runtimeError.value = ''
-
-  const runtimeBaseUrl = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = resolveRuntimeApiKey()
-  if (!runtimeBaseUrl || !runtimeApiKey) {
-    runtimeError.value = 'Runtime domain and API key are required before live probe.'
-    liveProbeLoading.value = false
-    return
-  }
-
-  try {
-    const payload = await syncProbeWithServer({
-      runBrowserProbe: false,
-    })
-    if (String(payload?.status || '').toLowerCase() === 'pending' && shouldAutoRunBrowserProbe(payload)) {
-      await runBrowserProbe({ silent: true })
-    }
-  } catch (error) {
-    runtimeError.value = error instanceof Error ? error.message : 'Live probe failed.'
-  } finally {
-    liveProbeLoading.value = false
-  }
-}
-
-async function runBrowserProbe({ silent = false } = {}) {
-  browserProbeLoading.value = true
-  if (!silent) runtimeError.value = ''
-
-  const runtimeBaseUrl = normalizeRuntimeBaseUrl(domainInput.value)
-  const runtimeApiKey = resolveRuntimeApiKey()
-  if (!runtimeBaseUrl || !runtimeApiKey) {
-    runtimeError.value = 'Runtime domain and API key are required before browser probe.'
-    browserProbeLoading.value = false
-    return
-  }
-
-  try {
-    const browserProbeRaw = await runBrowserProbeDirect(runtimeBaseUrl, runtimeApiKey, buildProbeHeaders())
-    const browserProbe = buildBrowserProbePayload(browserProbeRaw)
-    await syncProbeWithServer({
-      runBrowserProbe: true,
-      browserProbe,
-    })
-  } catch (error) {
-    runtimeError.value = error instanceof Error ? error.message : 'Browser probe failed.'
-  } finally {
-    browserProbeLoading.value = false
-  }
-}
-
-async function copyText(value) {
+async function copy(text) {
+  const value = String(text || '').trim()
+  if (!value) return
   try {
     await navigator.clipboard.writeText(value)
     copyState.value = 'Copied'
+    setTimeout(() => {
+      copyState.value = ''
+    }, 1200)
   } catch {
     copyState.value = 'Copy failed'
+    setTimeout(() => {
+      copyState.value = ''
+    }, 1200)
   }
-  setTimeout(() => {
-    copyState.value = ''
-  }, 1200)
 }
 
-onMounted(() => {
-  if (typeof window !== 'undefined') {
-    try {
-      const cachedDomain = String(window.localStorage.getItem(RUNTIME_DOMAIN_STORAGE_KEY) || '').trim()
-      if (cachedDomain && !domainInput.value) {
-        domainInput.value = cachedDomain
-      }
-    } catch {
-      // ignore storage errors
-    }
-  }
+onMounted(async () => {
+  await hydrateApiKeys()
   if (!runtimeApiKeyInput.value && revealedSecret.value) {
     runtimeApiKeyInput.value = revealedSecret.value
   }
-  hydrateApiKeys()
+  clearRevealedSecret()
 })
 </script>
 
 <template>
-  <section class="page">
-    <header class="page-header page-header-split">
-      <div class="header-stack">
-        <p class="eyebrow">Onboarding</p>
-        <h2>Onboarding</h2>
-        <p class="subtitle">Start with API key only. Runtime bind is an optional optimization for custom domains.</p>
-      </div>
-      <div class="header-actions">
-        <span :class="onboardingStatusClass">{{ onboardingStatusLabel }}</span>
-      </div>
-    </header>
-
+  <section class="quickstart-grid">
     <article class="panel">
-      <div class="panel-toolbar">
-        <h3>Step A: Generate or paste runtime key</h3>
-        <button class="button" type="button" :disabled="keyLoading || !scopeState.accountId" @click="createFirstKey">
-          {{ keyLoading ? 'Generating...' : 'Generate key' }}
-        </button>
+      <h2>Step A · Generate Runtime Key</h2>
+      <p class="muted">Use a runtime key only. No bootstrap, no bind flow.</p>
+
+      <div class="meta-row">
+        <span class="meta-label">Account</span>
+        <span class="mono">{{ accountId || '-' }}</span>
       </div>
-      <p class="muted">Account <strong>{{ scopeState.accountId || '-' }}</strong></p>
-      <p v-if="keyError" class="muted">{{ keyError }}</p>
-      <div v-if="revealedSecret" class="secret-banner">
-        <strong>Secret (once)</strong>
-        <code>{{ revealedSecret }}</code>
+      <div class="meta-row">
+        <span class="meta-label">App</span>
+        <span class="mono">{{ appId || '-' }}</span>
       </div>
-      <p v-if="latestKey" class="muted">
-        Latest key <code>{{ latestKey.maskedKey || latestKey.keyId }}</code>
-      </p>
+      <div class="meta-row">
+        <span class="meta-label">Onboarding</span>
+        <span class="mono">{{ onboardingStatus }}</span>
+      </div>
+
+      <button class="button button-primary" type="button" :disabled="keyLoading" @click="handleGenerateKey">
+        {{ keyLoading ? 'Generating...' : 'Generate Runtime Key' }}
+      </button>
+
+      <p v-if="keyError" class="error">{{ keyError }}</p>
+      <p v-else-if="latestKey" class="muted">Latest key: <span class="mono">{{ latestKey.maskedKey }}</span></p>
+
+      <label class="field-label" for="runtimeApiKey">Runtime API Key</label>
+      <input
+        id="runtimeApiKey"
+        v-model="runtimeApiKeyInput"
+        class="input"
+        autocomplete="off"
+        placeholder="Paste runtime key"
+      >
     </article>
 
     <article class="panel">
-      <div class="panel-toolbar">
-        <h3>Step B (Advanced, optional): Bind and probe custom runtime domain</h3>
-      </div>
+      <h2>Step B · Run /api/v2/bid</h2>
+      <p class="muted">Success criteria: get <span class="mono">requestId</span>. <span class="mono">No bid</span> with HTTP 200 is still success.</p>
 
-      <div class="form-grid">
-        <label>
-          Runtime domain
-          <input
-            v-model="domainInput"
-            class="input"
-            type="text"
-            placeholder="https://runtime.customer.com"
-            autocomplete="off"
-          >
-        </label>
-        <label>
-          Runtime API key
-          <input
-            v-model="runtimeApiKeyInput"
-            class="input"
-            type="password"
-            placeholder="sk_live_xxx"
-            autocomplete="off"
-          >
-        </label>
-      </div>
+      <button class="button button-primary" type="button" :disabled="bidLoading" @click="handleRunBidCheck">
+        {{ bidLoading ? 'Running...' : 'Run Bid Check' }}
+      </button>
 
-      <div class="form-grid">
-        <details class="verify-disclosure">
-          <summary>Advanced (optional): Probe headers for protected runtimes</summary>
-          <div class="form-grid">
-            <label>
-              Probe Header Key
-              <input v-model="probeHeaderKey1" class="input" type="text" placeholder="x-vercel-protection-bypass">
-            </label>
-            <label>
-              Probe Header Value
-              <input v-model="probeHeaderValue1" class="input" type="password" placeholder="token_1">
-            </label>
-          </div>
-          <div class="form-grid">
-            <label>
-              Probe Header Key 2
-              <input v-model="probeHeaderKey2" class="input" type="text" placeholder="cf-access-client-id">
-            </label>
-            <label>
-              Probe Header Value 2
-              <input v-model="probeHeaderValue2" class="input" type="password" placeholder="token_2">
-            </label>
-          </div>
-        </details>
-      </div>
+      <p v-if="bidError" class="error">{{ bidError }}</p>
 
-      <div class="toolbar-actions">
-        <button class="button" type="button" :disabled="bindLoading || !hasRuntimeApiKey" @click="bindRuntimeDomain">
-          {{ bindLoading ? 'Binding...' : 'Bind domain' }}
-        </button>
-        <button
-          v-if="showLiveProbeButton"
-          class="button button-secondary"
-          type="button"
-          :disabled="liveProbeLoading || !hasRuntimeApiKey"
-          @click="runLiveProbe"
-        >
-          {{ liveProbeLoading ? 'Probing...' : 'Run live probe' }}
-        </button>
-        <button
-          v-if="showBrowserProbeButton"
-          class="button button-secondary"
-          type="button"
-          :disabled="browserProbeLoading || !hasRuntimeApiKey"
-          @click="runBrowserProbe()"
-        >
-          {{ browserProbeLoading ? 'Browser probing...' : 'Run browser probe' }}
-        </button>
-      </div>
-
-      <p class="muted">
-        Skip this step if you only need fast integration. Use it when you want to route traffic to your own runtime domain.
-      </p>
-      <p v-if="runtimeError" class="muted">{{ runtimeError }}</p>
-
-      <div v-if="runtimeResult" class="verify-evidence">
-        <p><strong>requestId:</strong> <code>{{ runtimeResult.requestId || '-' }}</code></p>
-        <p><strong>bindState:</strong> <code>{{ runtimeBindStateLabel }}</code></p>
-        <p><strong>status:</strong> <code>{{ runtimeResult.status || '-' }}</code></p>
-        <p><strong>bindStage:</strong> <code>{{ runtimeResult.bindStage || '-' }}</code></p>
-        <p><strong>runtimeBaseUrl:</strong> <code>{{ runtimeResult.runtimeBaseUrl || '-' }}</code></p>
-        <p><strong>probeCode:</strong> <code>{{ runtimeProbeCode || '-' }}</code></p>
-        <p><strong>probeDetail:</strong> <code>{{ runtimeProbeDetail || '-' }}</code></p>
-        <p><strong>landingUrlSample:</strong> <code>{{ runtimeResult.landingUrlSample || '-' }}</code></p>
-        <ul v-if="Array.isArray(runtimeResult.nextActions) && runtimeResult.nextActions.length > 0" class="checklist">
-          <li v-for="action in runtimeResult.nextActions" :key="action">{{ action }}</li>
-        </ul>
-        <pre class="code-block">{{ runtimeEvidence }}</pre>
+      <div v-if="bidEvidence" class="evidence">
+        <div class="toolbar">
+          <h3>Bid Result</h3>
+          <button class="button button-secondary" type="button" @click="copy(bidEvidence)">Copy JSON</button>
+        </div>
+        <pre>{{ bidEvidence }}</pre>
       </div>
     </article>
 
-    <article class="panel">
-      <div class="panel-toolbar">
-        <h3>Step C: Copy SDK integration</h3>
-        <button class="button" type="button" @click="copyText(envSnippet)">
-          Copy env
-        </button>
+    <article class="panel panel-full">
+      <div class="toolbar">
+        <h2>MVP Snippet</h2>
+        <button class="button button-secondary" type="button" @click="copy(sdkSnippet)">Copy</button>
       </div>
-      <pre class="code-block">{{ envSnippet }}</pre>
-      <p class="muted">
-        Only one env var is required: <code>MEDIATION_API_KEY</code>.
-      </p>
 
-      <div class="panel-toolbar">
-        <h3>Bootstrap + bid call</h3>
-        <button class="button button-secondary" type="button" @click="copyText(sdkSnippet)">Copy snippet</button>
-      </div>
-      <pre class="code-block">{{ sdkSnippet }}</pre>
-      <p v-if="copyState" class="copy-note">{{ copyState }}</p>
-      <div v-if="bootstrapResult" class="verify-evidence">
-        <p><strong>bootstrap.runtimeBaseUrl:</strong> <code>{{ bootstrapResult.runtimeBaseUrl || '-' }}</code></p>
-        <p><strong>bootstrap.runtimeSource:</strong> <code>{{ bootstrapResult.runtimeSource || 'customer' }}</code></p>
-        <p v-if="bootstrapResult.customerRuntimeBaseUrl"><strong>bootstrap.customerRuntimeBaseUrl:</strong> <code>{{ bootstrapResult.customerRuntimeBaseUrl }}</code></p>
-        <p v-if="usingManagedRuntimeRoute" class="muted">
-          Managed runtime route is active. Integration can continue now; custom domain setup can be completed later.
-        </p>
-        <p><strong>bootstrap.bindStatus:</strong> <code>{{ bootstrapResult.bindStatus || '-' }}</code></p>
-        <p><strong>bootstrap.tenantId:</strong> <code>{{ bootstrapResult.tenantId || '-' }}</code></p>
-        <pre class="code-block">{{ bootstrapEvidence }}</pre>
-      </div>
-    </article>
+      <p class="muted">Main path is only: runtime key + <span class="mono">POST /api/v2/bid</span>. Events are optional enhancement.</p>
+      <pre>{{ sdkSnippet }}</pre>
 
-    <article class="panel">
-      <h3>Pass criteria</h3>
-      <ul class="checklist">
-        <li>Runtime API key is available (generated in Step A or existing key)</li>
-        <li>SDK bootstrap returns a valid <code>runtimeBaseUrl</code> (Step C)</li>
-        <li>Domain bind (Step B) is optional; if <code>pending</code>, SDK may auto-switch to managed route</li>
-        <li>Probe diagnostics show actionable code and next actions (Step B)</li>
-        <li>Only <code>verified</code> marks onboarding complete; <code>pending</code> keeps warning banner</li>
-      </ul>
+      <div class="toolbar env-toolbar">
+        <h3>.env</h3>
+        <button class="button button-secondary" type="button" @click="copy(envSnippet)">Copy</button>
+      </div>
+      <pre>{{ envSnippet }}</pre>
+      <p v-if="copyState" class="muted">{{ copyState }}</p>
     </article>
   </section>
 </template>
+
+<style scoped>
+.quickstart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.panel {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border-color, #d8dde6);
+  border-radius: 12px;
+  background: var(--panel-bg, #fff);
+}
+
+.panel-full {
+  grid-column: 1 / -1;
+}
+
+.muted {
+  margin: 0;
+  color: var(--text-muted, #5d6678);
+}
+
+.error {
+  margin: 0;
+  color: #b91c1c;
+}
+
+.meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meta-label {
+  color: var(--text-muted, #5d6678);
+}
+
+.field-label {
+  font-size: 0.9rem;
+  color: var(--text-muted, #5d6678);
+}
+
+.input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border-color, #d8dde6);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--border-color, #d8dde6);
+  border-radius: 10px;
+  padding: 12px;
+  background: #f8fafc;
+  font-size: 0.82rem;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+}
+
+@media (max-width: 980px) {
+  .quickstart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .panel-full {
+    grid-column: auto;
+  }
+}
+</style>

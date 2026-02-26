@@ -234,36 +234,6 @@ const rawControlPlaneClient = {
       })
     },
   },
-  runtimeDomain: {
-    verifyAndBind(payload = {}, options = {}) {
-      const runtimeApiKey = cleanText(options?.apiKey)
-      return requestJson('/v1/public/runtime-domain/verify-and-bind', {
-        method: 'POST',
-        authMode: 'bearer',
-        bearerToken: runtimeApiKey,
-        body: payload,
-      })
-    },
-    probe(payload = {}, options = {}) {
-      const runtimeApiKey = cleanText(options?.apiKey)
-      return requestJson('/v1/public/runtime-domain/probe', {
-        method: 'POST',
-        authMode: 'bearer',
-        bearerToken: runtimeApiKey,
-        body: payload,
-      })
-    },
-  },
-  sdk: {
-    bootstrap(options = {}) {
-      const runtimeApiKey = cleanText(options?.apiKey)
-      return requestJson('/v1/public/sdk/bootstrap', {
-        method: 'GET',
-        authMode: 'bearer',
-        bearerToken: runtimeApiKey,
-      })
-    },
-  },
   auth: {
     register(payload = {}) {
       return requestJson('/v1/public/dashboard/register', {
@@ -371,19 +341,6 @@ export const controlPlaneClient = {
   quickStart: {
     verify(payload) {
       return withControlPlaneCall(() => rawControlPlaneClient.quickStart.verify(payload || {}))
-    },
-  },
-  runtimeDomain: {
-    verifyAndBind(payload, options) {
-      return withControlPlaneCall(() => rawControlPlaneClient.runtimeDomain.verifyAndBind(payload || {}, options || {}))
-    },
-    probe(payload, options) {
-      return withControlPlaneCall(() => rawControlPlaneClient.runtimeDomain.probe(payload || {}, options || {}))
-    },
-  },
-  sdk: {
-    bootstrap(options) {
-      return withControlPlaneCall(() => rawControlPlaneClient.sdk.bootstrap(options || {}))
     },
   },
   auth: {

@@ -67,7 +67,7 @@ describe('auth-state onboarding behavior', () => {
     expect(isOnboardingUnlocked()).toBe(true)
   })
 
-  it('login marks onboarding pending as unlocked but not verified', async () => {
+  it('login normalizes pending onboarding to locked while keeping auth unlocked', async () => {
     vi.spyOn(controlPlaneClient.auth, 'login').mockResolvedValue({
       user: { email: 'pending@example.com', accountId: 'org_p', appId: '' },
       session: { id: 'sess_pending' },
@@ -80,7 +80,7 @@ describe('auth-state onboarding behavior', () => {
       password: 'password-123',
     })
 
-    expect(authState.onboarding.status).toBe('pending')
+    expect(authState.onboarding.status).toBe('locked')
     expect(isOnboardingUnlocked()).toBe(true)
     expect(isOnboardingVerified()).toBe(false)
   })
