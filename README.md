@@ -57,25 +57,34 @@ npm run build
 - `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME` (optional)
   Default: `0` (disabled). Set to `1` to enforce CNAME-to-gateway as a hard requirement.
 - `MEDIATION_RUNTIME_ALLOW_MANAGED_FALLBACK` (optional)
-  Default: `1` (enabled). Set to `0` to disable managed runtime fallback/default routing.
+  Default: `1` (enabled). Set to `0` to disable managed runtime fallback routing when bindStatus is pending/failed.
 - `MEDIATION_MANAGED_RUNTIME_BASE_URL` (optional)
-  Explicit managed runtime base URL for fallback/default mode. If unset, proxy auto-derives from `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
+  Explicit managed runtime base URL for fallback mode. If unset, proxy auto-derives from `MEDIATION_CONTROL_PLANE_API_BASE_URL`.
 
 ## Onboarding Contract
 
 - SDK/backend integration requires `MEDIATION_API_KEY`.
 - Hosted bootstrap origin is fixed at `https://tappy-ai-dashboard.vercel.app/api/v1/public/sdk/bootstrap` in the integration snippet, so no extra bootstrap env is required in normal onboarding.
-- `sdk/bootstrap` prefers a routable runtime: `customer(verified)` -> `managed_fallback(pending/failed)` -> `managed_default(unbound)`.
+- `sdk/bootstrap` routing is strict: `customer(verified)` -> `managed_fallback(pending/failed)`; `unbound` is treated as non-routable and returns `BINDING_NOT_READY`.
 - `verify-and-bind` now returns `status: verified | pending | failed`.
 - `pending` means domain is already bound (DNS + TLS passed), but live probe is still failing.
 - When bind status is `pending`, `sdk/bootstrap` can return `runtimeSource=managed_fallback` and a managed `runtimeBaseUrl` so SDK integration still works while custom runtime is being fixed.
-- When no binding exists, `sdk/bootstrap` can return `runtimeSource=managed_default` with `bindStatus=unbound` so key-only integration still works.
-- For `bindStatus=unbound`, bootstrap still returns a stable `tenantId` (derived from API key hash) to avoid empty-tenant integrations.
-- `/api/ad/bid` always returns `filled`; when `filled=false`, payload includes `reasonCode`, `reasonMessage`, `nextAction`, and `traceId`.
+- For `bindStatus=unbound`, bootstrap returns `503` with `error.code=BINDING_NOT_READY`.
+- `/api/ad/bid` always returns `filled`; when `filled=false`, payload includes:
+  - `reasonCode`, `reasonMessage`, `nextAction`
+  - `requestId`, `traceId`
+  - `bindStatus`, `tenantId`, `routeCode`, `upstreamStatus`
 - Dashboard navigation unlocks for both `pending` and `verified`, while a top warning banner remains for `pending`.
 - Onboarding is considered complete only when `status=verified`.
 - Runtime probe uses granular codes (for example `EGRESS_BLOCKED`, `ENDPOINT_404`, `AUTH_401_403`, `LANDING_URL_MISSING`) and returns actionable `nextActions`.
 - If `MEDIATION_RUNTIME_REQUIRE_GATEWAY_CNAME=1`, verify-and-bind also requires CNAME to the configured runtime gateway.
+
+## No-Fill Troubleshooting
+
+- If `/api/ad/bid` returns `reasonCode=BINDING_NOT_READY`, the API key is still `bindStatus=unbound`; this is a binding/config readiness issue, not a transport issue.
+- Use `traceId` to correlate dashboard proxy logs.
+- If present, use `requestId` to correlate upstream runtime/mediation logs.
+- Check `bindStatus`, `tenantId`, `routeCode`, and `upstreamStatus` to identify whether the no-fill happened before routing (`upstreamStatus=0`) or upstream (`upstreamStatus>0`).
 
 ## Auth Model
 
