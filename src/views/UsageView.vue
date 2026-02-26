@@ -8,6 +8,20 @@ const isLoading = computed(() => Boolean(dashboardState.meta.loading))
 const scopeLabel = computed(() => `account=${scopeState.accountId} · app=${scopeState.appId}`)
 const settlement = computed(() => dashboardState.settlementAggregates || {})
 const totals = computed(() => settlement.value.totals || {})
+const reasonRatios = computed(() => {
+  const fromTotals = totals.value?.reasonRatios
+  if (fromTotals && typeof fromTotals === 'object') return fromTotals
+
+  const fromSettlement = settlement.value?.reasonRatios
+  if (fromSettlement && typeof fromSettlement === 'object') return fromSettlement
+
+  return {}
+})
+
+function formatRatioPercent(value) {
+  const numeric = Number(value || 0)
+  return `${(numeric * 100).toFixed(2)}%`
+}
 
 const usageCards = computed(() => {
   const row = totals.value
@@ -43,6 +57,21 @@ const usageCards = computed(() => {
       label: 'CTR · Fill Rate',
       value: `${(ctr * 100).toFixed(2)}% · ${(fillRate * 100).toFixed(1)}%`,
       sub: 'Delivery effectiveness',
+    },
+    {
+      label: 'placement_unavailable',
+      value: formatRatioPercent(reasonRatios.value.placement_unavailable),
+      sub: 'No fill reason ratio',
+    },
+    {
+      label: 'inventory_empty',
+      value: formatRatioPercent(reasonRatios.value.inventory_empty),
+      sub: 'No fill reason ratio',
+    },
+    {
+      label: 'scope_violation',
+      value: formatRatioPercent(reasonRatios.value.scope_violation),
+      sub: 'No fill reason ratio',
     },
   ]
 })

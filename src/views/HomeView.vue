@@ -7,6 +7,20 @@ import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
 const isLoading = computed(() => Boolean(dashboardState.meta?.loading))
 
 const totals = computed(() => dashboardState.settlementAggregates?.totals || {})
+const reasonRatios = computed(() => {
+  const fromTotals = totals.value?.reasonRatios
+  if (fromTotals && typeof fromTotals === 'object') return fromTotals
+
+  const fromSettlement = dashboardState.settlementAggregates?.reasonRatios
+  if (fromSettlement && typeof fromSettlement === 'object') return fromSettlement
+
+  return {}
+})
+
+function formatRatioPercent(value) {
+  const numeric = Number(value || 0)
+  return `${(numeric * 100).toFixed(2)}%`
+}
 const lastSyncedLabel = computed(() => {
   const raw = dashboardState.meta?.lastSyncedAt
   if (!raw) return 'Not synced'
@@ -25,6 +39,18 @@ const revenueCards = computed(() => {
     { label: 'Revenue', value: `$${revenue.toFixed(2)}` },
     { label: 'Requests', value: requests.toLocaleString() },
     { label: 'Conversions', value: conversions.toLocaleString() },
+    {
+      label: 'placement_unavailable',
+      value: formatRatioPercent(reasonRatios.value.placement_unavailable),
+    },
+    {
+      label: 'inventory_empty',
+      value: formatRatioPercent(reasonRatios.value.inventory_empty),
+    },
+    {
+      label: 'scope_violation',
+      value: formatRatioPercent(reasonRatios.value.scope_violation),
+    },
   ]
 })
 
