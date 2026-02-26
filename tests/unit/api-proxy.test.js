@@ -152,4 +152,41 @@ describe('dashboardApiProxyHandler', () => {
     expect(requestOptions.headers.cookie).toBe('dash_session=s1')
     expect(requestOptions.headers['x-forwarded-origin']).toBe('https://dashboard.example.com')
   })
+
+  it('falls back to set-cookie header parsing when getSetCookie is unavailable', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
+
+    const payload = JSON.stringify({ ok: true })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      status: 200,
+      headers: {
+        get(name) {
+          if (String(name).toLowerCase() === 'set-cookie') {
+            return 'dash_session=s1; Path=/; HttpOnly; Secure, dash_csrf=c1; Path=/; Secure'
+          }
+          return null
+        },
+        entries() {
+          return new Map([
+            ['content-type', 'application/json; charset=utf-8'],
+            ['set-cookie', 'dash_session=s1; Path=/; HttpOnly; Secure'],
+          ]).entries()
+        },
+      },
+      async arrayBuffer() {
+        return new TextEncoder().encode(payload).buffer
+      },
+    })
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(createMockReq('/api/v1/public/dashboard/login', 'POST', {
+      'content-type': 'application/json',
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['set-cookie']).toEqual([
+      'dash_session=s1; Path=/; HttpOnly; Secure',
+      'dash_csrf=c1; Path=/; Secure',
+    ])
+  })
 })

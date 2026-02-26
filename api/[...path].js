@@ -118,12 +118,17 @@ export async function readRequestBody(req) {
 }
 
 function setUpstreamResponseHeaders(res, upstreamResponse) {
+  let cookies = []
   const getSetCookie = upstreamResponse.headers?.getSetCookie
   if (typeof getSetCookie === 'function') {
-    const cookies = getSetCookie.call(upstreamResponse.headers)
-    if (Array.isArray(cookies) && cookies.length > 0) {
-      res.setHeader('set-cookie', cookies)
-    }
+    cookies = getSetCookie.call(upstreamResponse.headers)
+  } else {
+    const rawSetCookie = upstreamResponse.headers.get('set-cookie')
+    cookies = parseSetCookieHeader(rawSetCookie)
+  }
+
+  if (Array.isArray(cookies) && cookies.length > 0) {
+    res.setHeader('set-cookie', cookies)
   }
 
   for (const [key, value] of upstreamResponse.headers.entries()) {
@@ -132,6 +137,40 @@ function setUpstreamResponseHeaders(res, upstreamResponse) {
     if (HOP_BY_HOP_HEADERS.has(normalizedKey)) continue
     res.setHeader(key, value)
   }
+}
+
+function parseSetCookieHeader(value) {
+  const input = String(value || '').trim()
+  if (!input) return []
+
+  const cookies = []
+  let start = 0
+  let inExpires = false
+
+  for (let i = 0; i < input.length; i += 1) {
+    const nextEight = input.slice(i, i + 8).toLowerCase()
+    if (nextEight === 'expires=') {
+      inExpires = true
+      i += 7
+      continue
+    }
+
+    const char = input[i]
+    if (inExpires && char === ';') {
+      inExpires = false
+      continue
+    }
+
+    if (!inExpires && char === ',') {
+      const chunk = input.slice(start, i).trim()
+      if (chunk) cookies.push(chunk)
+      start = i + 1
+    }
+  }
+
+  const tail = input.slice(start).trim()
+  if (tail) cookies.push(tail)
+  return cookies
 }
 
 export function sendJson(res, statusCode, payload) {
