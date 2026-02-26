@@ -107,12 +107,6 @@ describe('api proxy helpers', () => {
     })).toBe('https://prod.example.com/api')
   })
 
-  it('supports legacy vite-prefixed control-plane env keys', () => {
-    expect(resolveUpstreamBaseUrl({
-      VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://legacy.example.com',
-    })).toBe('https://legacy.example.com/api')
-  })
-
   it('resolves managed runtime base url from explicit env or control plane base as fallback', () => {
     expect(resolveManagedRuntimeBaseUrl({
       MEDIATION_CONTROL_PLANE_API_BASE_URL: 'https://prod.example.com/api',
@@ -195,6 +189,17 @@ describe('dashboardApiProxyHandler', () => {
 
     expect(res.statusCode).toBe(500)
     expect(JSON.parse(res.body).error.code).toBe('PROXY_TARGET_NOT_CONFIGURED')
+  })
+
+  it('returns explicit invalid-target error when upstream env is malformed', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = '"not-a-url"'
+    delete process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(createMockReq(), res)
+
+    expect(res.statusCode).toBe(500)
+    expect(JSON.parse(res.body).error.code).toBe('PROXY_TARGET_INVALID')
   })
 
   it('returns timeout error code when fetch aborts', async () => {

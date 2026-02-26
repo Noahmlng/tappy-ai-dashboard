@@ -1070,10 +1070,16 @@ async function setRuntimeBindingByAuthorization(authorization = '', binding = nu
 }
 
 export function normalizeUpstreamBaseUrl(rawValue) {
-  const value = String(rawValue || '')
+  let value = String(rawValue || '')
     .replace(/\\[nr]/g, '')
     .replace(/[\u0000-\u001F\u007F]/g, '')
     .trim()
+  if (
+    (value.startsWith('"') && value.endsWith('"'))
+    || (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1).trim()
+  }
   if (!value) return ''
 
   try {
@@ -1099,9 +1105,7 @@ export function normalizeUpstreamBaseUrl(rawValue) {
 export function resolveUpstreamBaseUrl(env = process.env) {
   const candidates = [
     env.MEDIATION_CONTROL_PLANE_API_BASE_URL,
-    env.VITE_MEDIATION_CONTROL_PLANE_API_BASE_URL,
     env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
-    env.VITE_MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
   ]
   for (const candidate of candidates) {
     const normalized = normalizeUpstreamBaseUrl(candidate)
@@ -1126,7 +1130,9 @@ function normalizePublicBaseUrl(rawValue) {
 
 export function resolveManagedRuntimeBaseUrl(env = process.env) {
   const explicit = normalizePublicBaseUrl(env.MEDIATION_MANAGED_RUNTIME_BASE_URL)
-  const fallback = explicit || resolveUpstreamBaseUrl(env)
+  const fallback = explicit || normalizeUpstreamBaseUrl(
+    env.MEDIATION_CONTROL_PLANE_API_BASE_URL || env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET,
+  )
   if (!fallback) return ''
   try {
     const parsed = new URL(fallback)
@@ -2305,10 +2311,18 @@ export default async function dashboardApiProxyHandler(req, res) {
 
   const upstreamBaseUrl = resolveUpstreamBaseUrl()
   if (!upstreamBaseUrl) {
+    const configuredButInvalid = Boolean(
+      cleanText(process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL)
+      || cleanText(process.env.MEDIATION_CONTROL_PLANE_API_PROXY_TARGET),
+    )
     sendJson(res, 500, {
       error: {
-        code: 'PROXY_TARGET_NOT_CONFIGURED',
-        message: 'Set MEDIATION_CONTROL_PLANE_API_BASE_URL (or MEDIATION_CONTROL_PLANE_API_PROXY_TARGET) to your control-plane API origin.',
+        code: configuredButInvalid
+          ? 'PROXY_TARGET_INVALID'
+          : 'PROXY_TARGET_NOT_CONFIGURED',
+        message: configuredButInvalid
+          ? 'MEDIATION_CONTROL_PLANE_API_BASE_URL (or MEDIATION_CONTROL_PLANE_API_PROXY_TARGET) is set but invalid. Use a full http/https origin, optionally with /api.'
+          : 'Set MEDIATION_CONTROL_PLANE_API_BASE_URL (or MEDIATION_CONTROL_PLANE_API_PROXY_TARGET) to your control-plane API origin.',
       },
     })
     return
