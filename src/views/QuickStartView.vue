@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 
 import { apiKeysState, clearRevealedSecret, createApiKey, hydrateApiKeys } from '../state/api-keys-state'
-import { authState, markOnboardingVerified } from '../state/auth-state'
+import { authState } from '../state/auth-state'
 import { scopeState } from '../state/scope-state'
 
 const placementId = 'chat_from_answer_v1'
@@ -10,9 +10,6 @@ const placementId = 'chat_from_answer_v1'
 const copyState = ref('')
 const keyLoading = ref(false)
 const keyError = ref('')
-const bidLoading = ref(false)
-const bidError = ref('')
-const bidResult = ref(null)
 const runtimeApiKeyInput = ref('')
 
 const rows = computed(() => (Array.isArray(apiKeysState.items) ? apiKeysState.items : []))
@@ -20,7 +17,6 @@ const latestKey = computed(() => rows.value[0] || null)
 const revealedSecret = computed(() => String(apiKeysState.meta.lastRevealedSecret || '').trim())
 const accountId = computed(() => String(scopeState.accountId || authState.user?.accountId || '').trim())
 const appId = computed(() => String(scopeState.appId || authState.user?.appId || '').trim())
-const onboardingStatus = computed(() => String(authState.onboarding.status || 'locked').toLowerCase())
 
 const envSnippet = computed(() => (
   `MEDIATION_API_KEY=${runtimeApiKeyInput.value || revealedSecret.value || '<generated_in_step_a>'}
@@ -51,22 +47,11 @@ if (!bidRes.ok) throw new Error(\`v2/bid failed: ${'${bidRes.status}'}\`);
 const bidJson = await bidRes.json();
 console.log({ requestId: bidJson.requestId, filled: bidJson.filled, landingUrl: bidJson.landingUrl });`)
 
-const bidEvidence = computed(() => (
-  bidResult.value ? JSON.stringify(bidResult.value, null, 2) : ''
-))
-const bidProxyTargetMissing = computed(() => (
-  String(bidResult.value?.error?.code || '').trim() === 'PROXY_RUNTIME_TARGET_NOT_CONFIGURED'
-))
-
 watch(revealedSecret, (value) => {
   if (!runtimeApiKeyInput.value && value) {
     runtimeApiKeyInput.value = value
   }
 })
-
-function resolveRuntimeApiKey() {
-  return String(runtimeApiKeyInput.value || revealedSecret.value || '').trim()
-}
 
 function resolveCreateKeyError(result) {
   const status = Number(result?.status || 0)
@@ -114,63 +99,6 @@ async function handleGenerateKey() {
   }
 }
 
-async function handleRunBidCheck() {
-  bidError.value = ''
-  bidResult.value = null
-
-  const runtimeApiKey = resolveRuntimeApiKey()
-  if (!runtimeApiKey) {
-    bidError.value = 'Runtime API key is required before testing /api/v2/bid.'
-    return
-  }
-
-  bidLoading.value = true
-  try {
-    const response = await fetch('/api/v2/bid', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${runtimeApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        userId: 'onboarding_user_001',
-        chatId: 'onboarding_chat_001',
-        placementId,
-        messages: [
-          { role: 'user', content: 'Recommend running shoes for rainy days' },
-          { role: 'assistant', content: 'Focus on grip and waterproof upper.' },
-        ],
-      }),
-    })
-
-    const payload = await response.json().catch(() => ({}))
-    bidResult.value = {
-      httpStatus: response.status,
-      ok: response.ok,
-      ...payload,
-    }
-
-    if (!response.ok) {
-      const errorCode = String(payload?.error?.code || '').trim()
-      const errorMessage = String(payload?.error?.message || '').trim()
-      if (errorCode === 'PROXY_RUNTIME_TARGET_NOT_CONFIGURED') {
-        bidError.value = '[PROXY_RUNTIME_TARGET_NOT_CONFIGURED] Optional dashboard check is unavailable. Set MEDIATION_RUNTIME_API_BASE_URL in this dashboard deployment.'
-        return
-      }
-      bidError.value = errorCode ? `[${errorCode}] ${errorMessage}` : (errorMessage || `HTTP ${response.status}`)
-      return
-    }
-
-    if (String(payload?.requestId || '').trim()) {
-      markOnboardingVerified()
-    }
-  } catch (error) {
-    bidError.value = error instanceof Error ? error.message : 'Request /api/v2/bid failed'
-  } finally {
-    bidLoading.value = false
-  }
-}
-
 async function copy(text) {
   const value = String(text || '').trim()
   if (!value) return
@@ -200,8 +128,8 @@ onMounted(async () => {
 <template>
   <section class="quickstart-grid">
     <article class="panel">
-      <h2>Step A · Generate Runtime Key</h2>
-      <p class="muted">Use a runtime key only. This is enough to start direct integration.</p>
+      <h2>Step 1 · Generate Runtime Key</h2>
+      <p class="muted">Generate one runtime key, then use it directly in your app request.</p>
 
       <div class="meta-row">
         <span class="meta-label">Account</span>
@@ -211,11 +139,6 @@ onMounted(async () => {
         <span class="meta-label">App</span>
         <span class="mono">{{ appId || '-' }}</span>
       </div>
-      <div class="meta-row">
-        <span class="meta-label">Onboarding</span>
-        <span class="mono">{{ onboardingStatus }}</span>
-      </div>
-
       <button class="button button-primary" type="button" :disabled="keyLoading" @click="handleGenerateKey">
         {{ keyLoading ? 'Generating...' : 'Generate Runtime Key' }}
       </button>
@@ -233,35 +156,13 @@ onMounted(async () => {
       >
     </article>
 
-    <article class="panel">
-      <h2>Optional Diagnostic · Run /api/v2/bid</h2>
-      <p class="muted">Not required for integration. This only checks whether this dashboard deployment can proxy runtime requests.</p>
-
-      <button class="button button-primary" type="button" :disabled="bidLoading" @click="handleRunBidCheck">
-        {{ bidLoading ? 'Running...' : 'Run Bid Check' }}
-      </button>
-
-      <p v-if="bidError" class="error">{{ bidError }}</p>
-      <p v-if="bidProxyTargetMissing" class="muted">
-        Set <span class="mono">MEDIATION_RUNTIME_API_BASE_URL</span> in Vercel Project Settings for this dashboard.
-      </p>
-
-      <div v-if="bidEvidence" class="evidence">
-        <div class="toolbar">
-          <h3>Bid Result</h3>
-          <button class="button button-secondary" type="button" @click="copy(bidEvidence)">Copy JSON</button>
-        </div>
-        <pre>{{ bidEvidence }}</pre>
-      </div>
-    </article>
-
     <article class="panel panel-full">
       <div class="toolbar">
-        <h2>Direct Integration Snippet</h2>
+        <h2>Step 2 · Copy Integration Snippet</h2>
         <button class="button button-secondary" type="button" @click="copy(integrationSnippet)">Copy</button>
       </div>
 
-      <p class="muted">Main path is only: runtime key + <span class="mono">POST /api/v2/bid</span>. No bootstrap/bind/events flow.</p>
+      <p class="muted">Only one request is needed: <span class="mono">POST /api/v2/bid</span>.</p>
       <pre>{{ integrationSnippet }}</pre>
 
       <div class="toolbar env-toolbar">

@@ -260,7 +260,7 @@ test.describe('dashboard smoke flow', () => {
     })
   })
 
-  test('login -> onboarding -> v2 bid -> unlock full navigation', async ({ page }) => {
+  test('login -> onboarding -> key generation -> unlock full navigation', async ({ page }) => {
     await page.goto('/login')
 
     await expect(page.getByRole('heading', { name: 'Sign In' })).toBeVisible()
@@ -271,10 +271,7 @@ test.describe('dashboard smoke flow', () => {
     await expect(page).toHaveURL(/\/onboarding$/)
 
     await page.getByRole('button', { name: 'Generate Runtime Key' }).click()
-    await page.getByRole('button', { name: 'Run Bid Check' }).click()
-
-    await expect(page.getByText('Bid Result')).toBeVisible()
-    await expect(page.locator('pre').filter({ hasText: 'req_bid_smoke_1' })).toBeVisible()
+    await expect(page.getByLabel('Runtime API Key')).toHaveValue('sk_live_new_secret')
 
     await page.locator('aside .nav-link[href="/home"]').first().click()
     await expect(page).toHaveURL(/\/home$/)
