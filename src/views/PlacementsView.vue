@@ -6,9 +6,41 @@ import {
   hydrateDashboardState,
   setPlacementEnabled,
   updatePlacementNumber,
+  updatePlacementText,
 } from '../state/dashboard-state'
 
 const placements = computed(() => Array.isArray(dashboardState.placements) ? dashboardState.placements : [])
+const adTypeOptions = [
+  { value: 'chat', label: 'Chat' },
+  { value: 'search', label: 'Search' },
+  { value: 'feed', label: 'Feed' },
+  { value: 'article', label: 'Article' },
+  { value: 'video', label: 'Video' },
+]
+
+function readPlacementType(placement) {
+  return String(placement?.placementType || placement?.surface || '').trim() || 'chat'
+}
+
+function typeFieldKey(placement) {
+  if (typeof placement?.placementType === 'string') return 'placementType'
+  return 'surface'
+}
+
+function optionsForPlacement(placement) {
+  const current = readPlacementType(placement)
+  if (adTypeOptions.some((item) => item.value === current)) {
+    return adTypeOptions
+  }
+  return [
+    ...adTypeOptions,
+    { value: current, label: `${current} (custom)` },
+  ]
+}
+
+function updatePlacementType(placement, nextValue) {
+  updatePlacementText(placement.placementId, typeFieldKey(placement), nextValue)
+}
 
 function refreshConfig() {
   hydrateDashboardState()
@@ -39,7 +71,7 @@ onMounted(() => {
         <div class="panel-head">
           <div>
             <h3>{{ placement.placementId }}</h3>
-            <p class="muted">{{ placement.surface || '-' }} · {{ Array.isArray(placement.bidders) ? placement.bidders.length : 0 }} bidders</p>
+            <p class="muted">{{ readPlacementType(placement) }} · {{ Array.isArray(placement.bidders) ? placement.bidders.length : 0 }} bidders</p>
           </div>
           <label class="inline-switch">
             <input
@@ -52,6 +84,22 @@ onMounted(() => {
         </div>
 
         <div class="form-grid">
+          <label>
+            Ad Type
+            <select
+              class="input"
+              :value="readPlacementType(placement)"
+              @change="updatePlacementType(placement, $event.target.value)"
+            >
+              <option
+                v-for="option in optionsForPlacement(placement)"
+                :key="`${placement.placementId}-${option.value}`"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
           <label>
             Fanout
             <input

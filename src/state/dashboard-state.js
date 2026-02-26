@@ -225,6 +225,15 @@ export function updatePlacementNumber(placementId, key, value, min = 0) {
   syncPlacement(placementId, { [key]: placement[key] })
 }
 
+export function updatePlacementText(placementId, key, value) {
+  const placement = withPlacement(placementId, (target) => {
+    target[key] = String(value || '').trim()
+  })
+  if (!placement) return
+
+  syncPlacement(placementId, { [key]: placement[key] })
+}
+
 export function updateFrequencyCap(placementId, key, value) {
   const placement = withPlacement(placementId, (target) => {
     const next = Math.max(0, Math.floor(toFiniteNumber(value, target.frequencyCap[key])))

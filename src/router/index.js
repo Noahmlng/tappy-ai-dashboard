@@ -78,6 +78,12 @@ const router = createRouter({
   routes,
 })
 
+const PRE_VERIFY_ALLOWED_ROUTES = new Set([
+  'onboarding',
+  'apiKeys',
+  'config',
+])
+
 router.beforeEach(async (to) => {
   if (!authState.ready) {
     await hydrateAuthSession()
@@ -97,7 +103,12 @@ router.beforeEach(async (to) => {
       query: { redirect: redirectTarget },
     }
   }
-  if (requiresAuth && authState.authenticated && !onboardingVerified && to.name !== 'onboarding') {
+  if (
+    requiresAuth
+    && authState.authenticated
+    && !onboardingVerified
+    && !PRE_VERIFY_ALLOWED_ROUTES.has(String(to.name || ''))
+  ) {
     return '/onboarding'
   }
   return true
