@@ -27,8 +27,38 @@ function createMockReq(url = '/api/v1/dashboard/state', method = 'GET', headers 
     url,
     method,
     headers,
+    body: undefined,
     [Symbol.asyncIterator]: async function* iterator() {
       yield ''
+    },
+  }
+}
+
+function createJsonUpstreamResponse(payload = {}, status = 200) {
+  const body = JSON.stringify(payload)
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: {
+      getSetCookie() {
+        return []
+      },
+      get(name) {
+        const normalizedName = String(name || '').toLowerCase()
+        if (normalizedName === 'content-type') return 'application/json; charset=utf-8'
+        return null
+      },
+      entries() {
+        return new Map([
+          ['content-type', 'application/json; charset=utf-8'],
+        ]).entries()
+      },
+    },
+    async json() {
+      return payload
+    },
+    async arrayBuffer() {
+      return new TextEncoder().encode(body).buffer
     },
   }
 }
@@ -188,5 +218,109 @@ describe('dashboardApiProxyHandler', () => {
       'dash_session=s1; Path=/; HttpOnly; Secure',
       'dash_csrf=c1; Path=/; Secure',
     ])
+  })
+
+  it('enriches quick-start verify payload from session scope when backend expects scope fields', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const normalizedUrl = String(url)
+      if (normalizedUrl.endsWith('/api/v1/public/dashboard/me')) {
+        return createJsonUpstreamResponse({
+          scope: { organizationId: 'org_auto', app_id: 'app_auto' },
+        })
+      }
+      if (normalizedUrl.endsWith('/api/v1/public/quick-start/verify')) {
+        return createJsonUpstreamResponse({
+          status: 'verified',
+          requestId: 'req_1',
+        })
+      }
+      throw new Error(`Unexpected upstream URL: ${normalizedUrl}`)
+    })
+
+    const req = createMockReq('/api/v1/public/quick-start/verify', 'POST', {
+      'content-type': 'application/json',
+      cookie: 'dash_session=s1',
+    })
+    req.body = {}
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [, verifyOptions] = fetchMock.mock.calls[1]
+    expect(JSON.parse(String(verifyOptions.body || '{}'))).toMatchObject({
+      accountId: 'org_auto',
+      appId: 'app_auto',
+      environment: 'prod',
+      placementId: 'chat_from_answer_v1',
+    })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('enriches create-key payload with defaults and inferred scope', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const normalizedUrl = String(url)
+      if (normalizedUrl.endsWith('/api/v1/public/dashboard/me')) {
+        return createJsonUpstreamResponse({
+          scope: { account_id: 'org_auto', appId: 'app_auto' },
+        })
+      }
+      if (normalizedUrl.endsWith('/api/v1/public/credentials/keys')) {
+        return createJsonUpstreamResponse({
+          key: { keyId: 'key_1' },
+        })
+      }
+      throw new Error(`Unexpected upstream URL: ${normalizedUrl}`)
+    })
+
+    const req = createMockReq('/api/v1/public/credentials/keys', 'POST', {
+      'content-type': 'application/json',
+      cookie: 'dash_session=s1',
+    })
+    req.body = {}
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [, createOptions] = fetchMock.mock.calls[1]
+    expect(JSON.parse(String(createOptions.body || '{}'))).toMatchObject({
+      accountId: 'org_auto',
+      appId: 'app_auto',
+      environment: 'prod',
+      name: 'runtime-prod',
+    })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('auto-generates accountId for register payload when legacy backend requires it', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://prod.example.com'
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      createJsonUpstreamResponse({ ok: true }),
+    )
+
+    const req = createMockReq('/api/v1/public/dashboard/register', 'POST', {
+      'content-type': 'application/json',
+    })
+    req.body = {
+      email: 'demo.user@example.com',
+      password: 'secret',
+    }
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [, registerOptions] = fetchMock.mock.calls[0]
+    const payload = JSON.parse(String(registerOptions.body || '{}'))
+    expect(payload.email).toBe('demo.user@example.com')
+    expect(payload.password).toBe('secret')
+    expect(payload.accountId).toMatch(/^org_demo_user_[a-z0-9]{6}$/)
+    expect(res.statusCode).toBe(200)
   })
 })
