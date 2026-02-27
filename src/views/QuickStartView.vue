@@ -27,16 +27,17 @@ const dashboardApiOrigin = computed(() => {
 })
 
 const envSnippet = computed(() => (
-  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || '<generated_in_step_1>'}`
+  `MEDIATION_API_KEY=${runtimeApiKeyInput.value || '<generated_in_step_1>'}\nMEDIATION_APP_ID=${appId.value || '<your-app-id>'}`
 ))
 
 const fastPathSnippet = computed(() => `import { createAdsSdkClient } from '@ai-network/tappy-ai-mediation/sdk/client'
 
 const runtimeKey = process.env.MEDIATION_API_KEY
+const appId = process.env.MEDIATION_APP_ID
 const ads = createAdsSdkClient({
   apiBaseUrl: '${dashboardApiOrigin.value}/api',
+  apiKey: runtimeKey,
   fetchImpl: fetch,
-  headers: () => ({ Authorization: \`Bearer ${'${runtimeKey}'}\` }),
   fastPath: true,
   timeouts: { config: 1200, bid: 1200, events: 800 },
   onDiagnostics: (diagnostics, flow) => {
@@ -48,22 +49,20 @@ async function onUserSend(messages, chatDonePromise) {
   const clickTs = Date.now()
 
   const result = await ads.runChatTurnWithAd({
-    appId: '${appId.value || '<your-app-id>'}',
+    appId,
     userId: 'user_001',
     chatId: 'chat_001',
-    placementId: '${placementId}',
-    placementKey: 'attach.post_answer_render',
     clickTs,
     bidPayload: {
       userId: 'user_001',
       chatId: 'chat_001',
-      placementId: '${placementId}',
       messages,
     },
     chatDonePromise,
     renderAd: (bid) => renderSponsorCard(bid),
   })
 
+  // placementId is optional here: runtime resolves default from Dashboard config.
   // result.diagnostics.stageDurationsMs / bidProbeStatus / outcomeCategory
   return result
 }`)
@@ -324,7 +323,7 @@ onMounted(async () => {
           <h3>Step 3 · FastPath Integration Snippet</h3>
           <span class="status-chip">Recommended</span>
         </div>
-        <p class="muted">Use `runChatTurnWithAd` so bid request runs in parallel with chat stream.</p>
+        <p class="muted">Use `runChatTurnWithAd` so bid request runs in parallel with chat stream. Placement is resolved from Dashboard by default.</p>
 
         <div class="toolbar">
           <button class="button button-secondary" type="button" @click="copy(fastPathSnippet)">Copy FastPath Snippet</button>
