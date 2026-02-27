@@ -248,6 +248,33 @@ describe('dashboardApiProxyHandler', () => {
     })
   })
 
+  it('does not inject placementId for quick-start verify payload', async () => {
+    process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://cp.example.com'
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(createJsonUpstreamResponse({ ok: true }))
+
+    const req = createMockReq('/api/v1/public/quick-start/verify', 'POST', {
+      authorization: 'Bearer dashboard_access',
+      'content-type': 'application/json',
+    })
+    req.body = {
+      accountId: 'org_demo',
+      appId: 'app_demo',
+      environment: 'prod',
+    }
+
+    const res = createMockRes()
+    await dashboardApiProxyHandler(req, res)
+
+    const [, init] = fetchMock.mock.calls[0]
+    const payload = JSON.parse(String(init.body || '{}'))
+    expect(Object.prototype.hasOwnProperty.call(payload, 'placementId')).toBe(false)
+    expect(payload).toMatchObject({
+      accountId: 'org_demo',
+      appId: 'app_demo',
+      environment: 'prod',
+    })
+  })
+
   it('keeps generic control-plane proxy forwarding intact', async () => {
     process.env.MEDIATION_CONTROL_PLANE_API_BASE_URL = 'https://cp.example.com'
 

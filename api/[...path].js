@@ -29,7 +29,6 @@ const BROWSER_ONLY_REQUEST_HEADERS = new Set([
 
 const UPSTREAM_TIMEOUT_MS = 10_000
 const DEFAULT_ENVIRONMENT = 'prod'
-const DEFAULT_PLACEMENT_ID = 'chat_from_answer_v1'
 const DEFAULT_KEY_NAME = 'runtime-prod'
 const URL_IN_TEXT_RE = /(https?:\/\/[^\s"'<>]+)/i
 
@@ -501,10 +500,6 @@ async function maybeEnrichRequest(req, upstreamBaseUrl, headers, body, signal) {
   if (isVerify) {
     if (!cleanText(nextPayload.environment)) {
       nextPayload.environment = DEFAULT_ENVIRONMENT
-      mutated = true
-    }
-    if (!cleanText(nextPayload.placementId)) {
-      nextPayload.placementId = DEFAULT_PLACEMENT_ID
       mutated = true
     }
   }

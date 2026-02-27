@@ -6,8 +6,6 @@ import { apiKeysState, clearRevealedSecret, createApiKey, hydrateApiKeys } from 
 import { authState } from '../state/auth-state'
 import { scopeState } from '../state/scope-state'
 
-const placementId = 'chat_from_answer_v1'
-
 const copyState = ref('')
 const keyLoading = ref(false)
 const keyError = ref('')
@@ -62,7 +60,7 @@ async function onUserSend(messages, chatDonePromise) {
     renderAd: (bid) => renderSponsorCard(bid),
   })
 
-  // placementId is optional here: runtime resolves default from Dashboard config.
+  // Runtime resolves placement from Dashboard config by default.
   // result.diagnostics.stageDurationsMs / bidProbeStatus / outcomeCategory
   return result
 }`)
@@ -72,8 +70,7 @@ const verifySnippet = computed(() => `curl -sS -X POST "${dashboardApiOrigin.val
   -d '{
     "accountId": "${accountId.value || '<your-account-id>'}",
     "appId": "${appId.value || '<your-app-id>'}",
-    "environment": "prod",
-    "placementId": "${placementId}"
+    "environment": "prod"
   }'`)
 
 const knownFillSnippet = computed(() => `{
@@ -186,7 +183,6 @@ async function handleVerify() {
       accountId: normalizedAccountId,
       appId: normalizedAppId,
       environment: 'prod',
-      placementId,
     })
 
     verifyResult.value = {
@@ -284,7 +280,7 @@ onMounted(async () => {
           <h3>Step 2 · Preflight Verify</h3>
           <span class="status-chip" :class="`status-${verifyStatusTone}`">{{ verifyStatusLabel }}</span>
         </div>
-        <p class="muted">Checks active key + placement + inventory readiness before coding.</p>
+        <p class="muted">Checks active key + inventory readiness before coding.</p>
 
         <div class="toolbar">
           <button class="button button-secondary" type="button" @click="copy(verifySnippet)">Copy Verify cURL</button>
