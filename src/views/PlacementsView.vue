@@ -7,6 +7,7 @@ import {
   setPlacementEnabled,
   updatePlacementNumber,
   updatePlacementText,
+  updateTriggerNumber,
 } from '../state/dashboard-state'
 
 const placements = computed(() => Array.isArray(dashboardState.placements) ? dashboardState.placements : [])
@@ -40,6 +41,12 @@ function optionsForPlacement(placement) {
 
 function updatePlacementType(placement, nextValue) {
   updatePlacementText(placement.placementId, typeFieldKey(placement), nextValue)
+}
+
+function readTriggerValue(placement, key, fallback) {
+  const trigger = placement?.trigger
+  const numeric = Number(trigger && trigger[key])
+  return Number.isFinite(numeric) ? numeric : fallback
 }
 
 function refreshConfig() {
@@ -120,6 +127,29 @@ onMounted(() => {
               step="50"
               :value="Number(placement.globalTimeoutMs || 1200)"
               @change="updatePlacementNumber(placement.placementId, 'globalTimeoutMs', $event.target.value, 100)"
+            >
+          </label>
+          <label>
+            Intent Threshold
+            <input
+              class="input"
+              type="number"
+              min="0"
+              max="1"
+              step="0.01"
+              :value="readTriggerValue(placement, 'intentThreshold', 0.7)"
+              @change="updateTriggerNumber(placement.placementId, 'intentThreshold', $event.target.value)"
+            >
+          </label>
+          <label>
+            Cooldown (ms)
+            <input
+              class="input"
+              type="number"
+              min="0"
+              step="50"
+              :value="readTriggerValue(placement, 'cooldownMs', 1000)"
+              @change="updateTriggerNumber(placement.placementId, 'cooldownMs', $event.target.value)"
             >
           </label>
         </div>

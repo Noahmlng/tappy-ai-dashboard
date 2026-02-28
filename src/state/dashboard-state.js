@@ -250,6 +250,9 @@ export function updateFrequencyCap(placementId, key, value) {
 
 export function updateTriggerNumber(placementId, key, value) {
   const placement = withPlacement(placementId, (target) => {
+    if (!target.trigger || typeof target.trigger !== 'object') {
+      target.trigger = {}
+    }
     const current = target.trigger[key]
     const nextValue = toFiniteNumber(value, current)
 

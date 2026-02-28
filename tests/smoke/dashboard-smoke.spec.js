@@ -291,6 +291,11 @@ test.describe('dashboard smoke flow', () => {
     await page.locator('aside .nav-link[href="/config"]').first().click()
     await expect(page).toHaveURL(/\/config$/)
     await expect(page.getByRole('heading', { name: 'Placement', exact: true })).toBeVisible()
+    const thresholdInput = page.getByLabel('Intent Threshold').first()
+    await expect(thresholdInput).toHaveValue('0.7')
+    await thresholdInput.fill('0.82')
+    await thresholdInput.press('Tab')
+    await expect(thresholdInput).toHaveValue('0.82')
 
     await page.locator('aside .nav-link[href="/logs"]').first().click()
     await expect(page).toHaveURL(/\/logs$/)
