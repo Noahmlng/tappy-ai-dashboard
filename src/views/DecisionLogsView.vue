@@ -5,10 +5,11 @@ import { useAutoRefresh } from '../composables/use-auto-refresh'
 import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
 import { buildFilterOptions, buildUnifiedLogs } from '../state/logs-view-model'
 
-const resultFilter = ref('ALL')
-const sourceFilter = ref('ALL')
-const interactionFilter = ref('ALL')
+const interactionFilter = ref('click')
 const placementFilter = ref('ALL')
+const resultFilter = ref('ALL')
+const showAllEvents = ref(false)
+
 const isLoading = computed(() => Boolean(dashboardState.meta.loading))
 
 const { triggerRefresh: refreshLogs } = useAutoRefresh(
@@ -19,33 +20,29 @@ const { triggerRefresh: refreshLogs } = useAutoRefresh(
   },
 )
 
-const allRows = computed(() => buildUnifiedLogs({
-  decisionLogs: dashboardState.decisionLogs,
-  networkFlowLogs: dashboardState.networkFlowLogs,
-  placementAuditLogs: dashboardState.placementAuditLogs,
+const chainRows = computed(() => buildUnifiedLogs({
   eventLogs: dashboardState.eventLogs,
+  decisionLogs: dashboardState.decisionLogs,
+  placementAuditLogs: dashboardState.placementAuditLogs,
 }))
 
-const filterOptions = computed(() => buildFilterOptions(allRows.value))
+const filterOptions = computed(() => buildFilterOptions(chainRows.value))
 
-const filteredLogs = computed(() => {
-  return allRows.value.filter((row) => {
-    const matchResult = resultFilter.value === 'ALL' || row.result === resultFilter.value
-    const matchSource = sourceFilter.value === 'ALL' || row.source === sourceFilter.value
-    const matchInteraction = interactionFilter.value === 'ALL' || row.kind === interactionFilter.value
+const filteredRows = computed(() => {
+  return chainRows.value.filter((row) => {
+    const matchInteraction = showAllEvents.value
+      ? true
+      : (interactionFilter.value === 'ALL' || row.kind === interactionFilter.value)
     const matchPlacement = placementFilter.value === 'ALL' || row.placementId === placementFilter.value
-    return matchResult && matchSource && matchInteraction && matchPlacement
+    const matchResult = resultFilter.value === 'ALL' || row.result === resultFilter.value
+    return matchInteraction && matchPlacement && matchResult
   })
 })
 
-const hasRuntimeFlowLogs = computed(() => (
-  Array.isArray(dashboardState.networkFlowLogs) && dashboardState.networkFlowLogs.length > 0
-))
-
-function resultPillClass(result) {
-  if (result === 'served' || result === 'success' || result === 'ok') return 'status-pill good'
-  if (result === 'error' || result === 'failed') return 'status-pill bad'
-  return 'status-pill warn'
+function formatRevenue(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return '-'
+  return `$${numeric.toFixed(2)}`
 }
 </script>
 
@@ -53,9 +50,9 @@ function resultPillClass(result) {
   <section class="page">
     <header class="page-header page-header-split">
       <div class="header-stack">
-        <p class="eyebrow">Logs</p>
-        <h2>Chain Logs</h2>
-        <p class="subtitle">Decision + Runtime Flow + Placement Audit</p>
+        <p class="eyebrow">Chains</p>
+        <h2>Interaction Chains</h2>
+        <p class="subtitle">Click-focused chain view for output links</p>
       </div>
       <div class="header-actions">
         <button class="button" type="button" :disabled="isLoading" @click="refreshLogs">
@@ -66,37 +63,21 @@ function resultPillClass(result) {
 
     <article class="panel panel-soft">
       <div class="panel-toolbar">
-        <h3>Rows</h3>
-        <p class="muted">{{ filteredLogs.length }}</p>
+        <h3>Chains</h3>
+        <p class="muted">{{ filteredRows.length }}</p>
       </div>
 
-      <p v-if="!hasRuntimeFlowLogs" class="muted">
-        当前上游未返回 runtime flow logs
-      </p>
+      <div class="toolbar-actions">
+        <button class="button button-secondary" type="button" @click="showAllEvents = !showAllEvents">
+          {{ showAllEvents ? 'Click-only View' : 'Show All Events' }}
+        </button>
+      </div>
 
       <div class="filters">
         <label>
-          Result
-          <select v-model="resultFilter" class="input">
-            <option v-for="option in filterOptions.results" :key="`result-${option}`" :value="option">{{ option }}</option>
-          </select>
-        </label>
-
-        <label>
-          Source
-          <select v-model="sourceFilter" class="input">
-            <option v-for="option in filterOptions.sources" :key="`source-${option}`" :value="option">{{ option }}</option>
-          </select>
-        </label>
-
-        <label>
           Interaction
-          <select v-model="interactionFilter" class="input">
-            <option value="ALL">ALL</option>
-            <option value="click">click</option>
-            <option value="impression">impression</option>
-            <option value="conversion">conversion</option>
-            <option value="postback">postback</option>
+          <select v-model="interactionFilter" class="input" :disabled="showAllEvents">
+            <option v-for="option in filterOptions.interactions" :key="`interaction-${option}`" :value="option">{{ option }}</option>
           </select>
         </label>
 
@@ -106,6 +87,13 @@ function resultPillClass(result) {
             <option v-for="option in filterOptions.placements" :key="`placement-${option}`" :value="option">{{ option }}</option>
           </select>
         </label>
+
+        <label>
+          Result
+          <select v-model="resultFilter" class="input">
+            <option v-for="option in filterOptions.results" :key="`result-${option}`" :value="option">{{ option }}</option>
+          </select>
+        </label>
       </div>
 
       <div class="table-wrapper">
@@ -113,37 +101,36 @@ function resultPillClass(result) {
           <thead>
             <tr>
               <th>Time</th>
-              <th>Trace/Req ID</th>
-              <th>Source</th>
-              <th>Stage/Event</th>
-              <th>Result/Status</th>
-              <th>Interaction</th>
-              <th>Link</th>
+              <th>Request ID</th>
               <th>Placement</th>
-              <th>Detail</th>
+              <th>Clicked Link</th>
+              <th>Click Status</th>
+              <th>Postback Status</th>
+              <th>Revenue</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in filteredLogs" :key="`${row.source}-${row.id}-${row.timestamp}`">
+            <tr v-for="row in filteredRows" :key="row.id">
               <td>{{ row.timeLabel }}</td>
-              <td>{{ row.traceId }}</td>
-              <td><code>{{ row.source }}</code></td>
-              <td>{{ row.stage }}</td>
+              <td>{{ row.requestId }}</td>
+              <td>{{ row.placementId }}</td>
               <td>
-                <span :class="resultPillClass(row.result)">{{ row.result }}</span>
-              </td>
-              <td>{{ row.kind || '-' }}</td>
-              <td>
-                <a v-if="row.linkUrl && row.linkUrl !== '-'" :href="row.linkUrl" target="_blank" rel="noopener noreferrer">
-                  {{ row.linkUrl }}
+                <a
+                  v-if="row.clickedLink && row.clickedLink !== '-'"
+                  :href="row.clickedLink"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {{ row.clickedLink }}
                 </a>
                 <span v-else>-</span>
               </td>
-              <td>{{ row.placementId }}</td>
-              <td>{{ row.detail }}</td>
+              <td>{{ row.clickStatus || '-' }}</td>
+              <td>{{ row.postbackStatus || '-' }}</td>
+              <td>{{ formatRevenue(row.revenue) }}</td>
             </tr>
-            <tr v-if="filteredLogs.length === 0">
-              <td colspan="9" class="muted">No chain logs.</td>
+            <tr v-if="filteredRows.length === 0">
+              <td colspan="7" class="muted">No interaction chains.</td>
             </tr>
           </tbody>
         </table>

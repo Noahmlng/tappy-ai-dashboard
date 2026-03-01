@@ -2,23 +2,6 @@ function cleanText(value) {
   return String(value || '').trim()
 }
 
-function firstText(source, keys = []) {
-  for (const key of keys) {
-    const normalized = cleanText(source?.[key])
-    if (normalized) return normalized
-  }
-  return ''
-}
-
-function firstNumber(source, keys = []) {
-  for (const key of keys) {
-    const raw = source?.[key]
-    const numeric = Number(raw)
-    if (Number.isFinite(numeric)) return numeric
-  }
-  return 0
-}
-
 function toTimestamp(value, fallback = 0) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   const text = cleanText(value)
@@ -28,141 +11,245 @@ function toTimestamp(value, fallback = 0) {
   return fallback
 }
 
-function buildDetail(source = {}, keys = []) {
-  const text = firstText(source, keys)
-  if (text) return text
-
-  const code = firstText(source, ['code', 'errorCode', 'reasonCode'])
-  if (code) return code
-
-  return '-'
+function toNumber(value, fallback = 0) {
+  const numeric = Number(value)
+  if (Number.isFinite(numeric)) return numeric
+  return fallback
 }
 
-function normalizeDecisionLog(row = {}, index = 0) {
+function firstText(source, keys = []) {
+  for (const key of keys) {
+    const value = cleanText(source?.[key])
+    if (value) return value
+  }
+  return ''
+}
+
+function linkByPriority(source = {}) {
+  const keys = ['targetUrl', 'clickUrl', 'landingUrl', 'trackingUrl', 'url']
+  for (let index = 0; index < keys.length; index += 1) {
+    const link = cleanText(source?.[keys[index]])
+    if (link) return { link, priority: index }
+  }
+  return { link: '-', priority: Number.POSITIVE_INFINITY }
+}
+
+function meaningfulText(value) {
+  const text = cleanText(value)
+  if (!text || text === '-') return ''
+  return text
+}
+
+function normalizeInteractionKind(source = {}) {
+  const eventType = cleanText(source.eventType).toLowerCase()
+  const kind = cleanText(source.kind).toLowerCase()
+  const event = cleanText(source.event).toLowerCase()
+
+  if (kind) return kind
+  if (eventType === 'redirect_click') return 'click'
+  if (eventType === 'postback') return 'postback'
+  if (event === 'click') return 'click'
+  if (event === 'impression') return 'impression'
+  return 'event'
+}
+
+function normalizeEventRow(row = {}, index = 0) {
   const timestamp = toTimestamp(
-    firstText(row, ['createdAt', 'timestamp', 'occurredAt', 'eventAt']),
+    firstText(row, ['createdAt', 'occurredAt', 'eventAt', 'timestamp']),
     Date.now() - index,
   )
+  const kind = normalizeInteractionKind(row)
+  const result = firstText(row, ['result', 'status', 'eventStatus', 'postbackStatus']) || '-'
+
+  const clickLink = linkByPriority(row)
+
   return {
-    id: firstText(row, ['id', 'requestId', 'traceId']) || `decision_${index}`,
+    source: 'event',
+    id: firstText(row, ['id', 'eventId']) || `event_${index}`,
+    requestId: firstText(row, ['requestId', 'traceId']),
     timestamp,
     timeLabel: firstText(row, ['createdAt', 'occurredAt', 'eventAt']) || '-',
-    traceId: firstText(row, ['requestId', 'traceId', 'id']) || '-',
+    kind,
+    placementId: firstText(row, ['placementId', 'placement']) || '-',
+    clickedLink: clickLink.link,
+    clickedLinkPriority: clickLink.priority,
+    clickStatus: kind === 'click' ? result : '-',
+    postbackStatus: kind === 'postback' ? result : '-',
+    result,
+    revenueUsd: toNumber(row.revenueUsd, 0),
+    detail: firstText(row, ['reasonDetail', 'reasonCode', 'reason', 'message']) || '-',
+  }
+}
+
+function normalizeDecisionRow(row = {}, index = 0) {
+  const timestamp = toTimestamp(
+    firstText(row, ['createdAt', 'occurredAt', 'eventAt', 'timestamp']),
+    Date.now() - index,
+  )
+
+  return {
     source: 'decision',
-    stage: firstText(row, ['stage', 'event', 'action']) || 'decision',
-    result: firstText(row, ['result', 'status', 'outcome']) || '-',
-    placementId: firstText(row, ['placementId', 'placement', 'placement_id']) || '-',
-    detail: buildDetail(row, ['reasonDetail', 'reason', 'message']),
+    id: firstText(row, ['id']) || `decision_${index}`,
+    requestId: firstText(row, ['requestId', 'traceId']),
+    timestamp,
+    timeLabel: firstText(row, ['createdAt', 'occurredAt', 'eventAt']) || '-',
+    kind: 'decision',
+    placementId: firstText(row, ['placementId', 'placement']) || '-',
+    clickedLink: '-',
+    clickedLinkPriority: Number.POSITIVE_INFINITY,
+    clickStatus: '-',
+    postbackStatus: '-',
+    result: firstText(row, ['result', 'status']) || '-',
+    revenueUsd: 0,
+    detail: firstText(row, ['reasonDetail', 'reason', 'message']) || '-',
   }
 }
 
-function normalizeRuntimeFlowLog(row = {}, index = 0) {
+function normalizeAuditRow(row = {}, index = 0) {
   const timestamp = toTimestamp(
-    firstText(row, ['createdAt', 'timestamp', 'occurredAt', 'eventAt']),
-    Date.now() - index,
-  )
-  return {
-    id: firstText(row, ['id', 'requestId', 'traceId']) || `runtime_flow_${index}`,
-    timestamp,
-    timeLabel: firstText(row, ['createdAt', 'occurredAt', 'eventAt']) || '-',
-    traceId: firstText(row, ['traceId', 'requestId', 'id']) || '-',
-    source: 'runtime_flow',
-    stage: firstText(row, ['stage', 'event', 'step']) || 'runtime',
-    result: firstText(row, ['status', 'result', 'outcome']) || '-',
-    placementId: firstText(row, ['placementId', 'placement', 'placement_id']) || '-',
-    detail: buildDetail(row, ['message', 'error', 'reasonDetail', 'reason']),
-  }
-}
-
-function normalizePlacementAuditLog(row = {}, index = 0) {
-  const timestamp = toTimestamp(
-    firstText(row, ['createdAt', 'timestamp', 'occurredAt', 'eventAt']),
+    firstText(row, ['createdAt', 'occurredAt', 'eventAt', 'timestamp']),
     Date.now() - index,
   )
 
-  const changedCount = firstNumber(row, ['changedCount', 'changed_fields_count'])
-  const fallbackDetail = changedCount > 0 ? `changed_fields=${changedCount}` : '-'
-  const detail = buildDetail(row, ['message', 'reasonDetail', 'reason'])
-
   return {
-    id: firstText(row, ['id', 'auditId']) || `placement_audit_${index}`,
+    source: 'audit',
+    id: firstText(row, ['id', 'auditId']) || `audit_${index}`,
+    requestId: firstText(row, ['requestId', 'traceId']),
     timestamp,
     timeLabel: firstText(row, ['createdAt', 'occurredAt', 'eventAt']) || '-',
-    traceId: firstText(row, ['requestId', 'traceId', 'id', 'auditId']) || '-',
-    source: 'placement_audit',
-    stage: firstText(row, ['action', 'event', 'field']) || 'placement_update',
+    kind: 'audit',
+    placementId: firstText(row, ['placementId', 'placement']) || '-',
+    clickedLink: '-',
+    clickedLinkPriority: Number.POSITIVE_INFINITY,
+    clickStatus: '-',
+    postbackStatus: '-',
     result: firstText(row, ['status', 'result']) || '-',
-    placementId: firstText(row, ['placementId', 'placement', 'placement_id']) || '-',
-    detail: detail === '-' ? fallbackDetail : detail,
+    revenueUsd: 0,
+    detail: firstText(row, ['reasonDetail', 'reason', 'message', 'action']) || '-',
   }
 }
 
-function normalizeRuntimeEventLog(row = {}, index = 0) {
-  const timestamp = toTimestamp(
-    firstText(row, ['createdAt', 'timestamp', 'occurredAt', 'eventAt']),
-    Date.now() - index,
-  )
-  const linkUrl = firstText(row, [
-    'targetUrl',
-    'clickUrl',
-    'landingUrl',
-    'trackingUrl',
-    'url',
-  ])
+function chainKey(row, index) {
+  const requestId = cleanText(row.requestId)
+  if (requestId) return `request:${requestId}`
+  return `fallback:${row.source}:${row.id}:${index}`
+}
 
-  return {
-    id: firstText(row, ['id', 'eventId', 'requestId', 'traceId']) || `runtime_event_${index}`,
-    timestamp,
-    timeLabel: firstText(row, ['createdAt', 'occurredAt', 'eventAt']) || '-',
-    traceId: firstText(row, ['requestId', 'traceId', 'id']) || '-',
-    source: 'runtime_event',
-    stage: firstText(row, ['eventType', 'event', 'kind']) || 'sdk_event',
-    result: firstText(row, ['result', 'status', 'eventStatus']) || '-',
-    placementId: firstText(row, ['placementId', 'placement', 'placement_id']) || '-',
-    detail: buildDetail(row, ['reasonDetail', 'reason', 'message', 'reasonCode']),
-    kind: firstText(row, ['kind']) || '-',
-    eventType: firstText(row, ['eventType']) || '-',
-    linkUrl: linkUrl || '-',
-    adId: firstText(row, ['adId']) || '-',
-    factId: firstText(row, ['factId']) || '-',
-    revenueUsd: Number.isFinite(Number(row?.revenueUsd)) ? Number(row.revenueUsd) : 0,
-  }
+function computeInteraction(chain) {
+  if (cleanText(chain.clickStatus) !== '-') return 'click'
+  if (cleanText(chain.postbackStatus) !== '-') return 'postback'
+  if (chain.hasImpression) return 'impression'
+  if (chain.hasDecision) return 'decision'
+  return 'event'
 }
 
 export function buildUnifiedLogs(input = {}) {
   const decisionLogs = Array.isArray(input.decisionLogs) ? input.decisionLogs : []
-  const networkFlowLogs = Array.isArray(input.networkFlowLogs) ? input.networkFlowLogs : []
   const placementAuditLogs = Array.isArray(input.placementAuditLogs) ? input.placementAuditLogs : []
   const eventLogs = Array.isArray(input.eventLogs) ? input.eventLogs : []
 
-  const mapped = [
-    ...decisionLogs.map((row, index) => normalizeDecisionLog(row, index)),
-    ...networkFlowLogs.map((row, index) => normalizeRuntimeFlowLog(row, index)),
-    ...placementAuditLogs.map((row, index) => normalizePlacementAuditLog(row, index)),
-    ...eventLogs.map((row, index) => normalizeRuntimeEventLog(row, index)),
+  const normalizedRows = [
+    ...eventLogs.map((row, index) => normalizeEventRow(row, index)),
+    ...decisionLogs.map((row, index) => normalizeDecisionRow(row, index)),
+    ...placementAuditLogs.map((row, index) => normalizeAuditRow(row, index)),
   ]
 
-  return mapped.sort((a, b) => b.timestamp - a.timestamp)
+  const chains = new Map()
+  normalizedRows.forEach((row, index) => {
+    const key = chainKey(row, index)
+    if (!chains.has(key)) {
+      chains.set(key, {
+        id: key,
+        requestId: cleanText(row.requestId) || '-',
+        timestamp: row.timestamp,
+        timeLabel: row.timeLabel,
+        placementId: cleanText(row.placementId) || '-',
+        clickedLink: '-',
+        clickedLinkPriority: Number.POSITIVE_INFINITY,
+        clickStatus: '-',
+        postbackStatus: '-',
+        revenueUsd: 0,
+        result: cleanText(row.result) || '-',
+        detail: cleanText(row.detail) || '-',
+        hasImpression: false,
+        hasDecision: false,
+      })
+    }
+
+    const chain = chains.get(key)
+    if (row.timestamp >= chain.timestamp) {
+      chain.timestamp = row.timestamp
+      chain.timeLabel = row.timeLabel
+      chain.result = cleanText(row.result) || chain.result
+      chain.detail = cleanText(row.detail) || chain.detail
+    }
+
+    if (chain.placementId === '-' && cleanText(row.placementId)) {
+      chain.placementId = cleanText(row.placementId)
+    }
+
+    if (cleanText(row.clickedLink) && row.clickedLinkPriority < chain.clickedLinkPriority) {
+      chain.clickedLink = cleanText(row.clickedLink)
+      chain.clickedLinkPriority = row.clickedLinkPriority
+    }
+
+    if (row.kind === 'click') {
+      chain.clickStatus = cleanText(row.clickStatus) || chain.clickStatus
+      chain.revenueUsd = Math.max(chain.revenueUsd, toNumber(row.revenueUsd, 0))
+    }
+    if (row.kind === 'postback') {
+      chain.postbackStatus = cleanText(row.postbackStatus) || chain.postbackStatus
+      chain.revenueUsd = Math.max(chain.revenueUsd, toNumber(row.revenueUsd, 0))
+    }
+    if (row.kind === 'impression') {
+      chain.hasImpression = true
+    }
+    if (row.kind === 'decision') {
+      chain.hasDecision = true
+    }
+  })
+
+  return Array.from(chains.values())
+    .map((chain) => {
+      const interaction = computeInteraction(chain)
+      const primaryResult =
+        meaningfulText(chain.clickStatus) ||
+        meaningfulText(chain.postbackStatus) ||
+        meaningfulText(chain.result)
+      return {
+        id: chain.id,
+        timestamp: chain.timestamp,
+        timeLabel: chain.timeLabel,
+        requestId: chain.requestId,
+        placementId: chain.placementId,
+        clickedLink: chain.clickedLink,
+        clickStatus: chain.clickStatus,
+        postbackStatus: chain.postbackStatus,
+        revenue: chain.revenueUsd,
+        kind: interaction,
+        result: primaryResult || '-',
+      }
+    })
+    .sort((a, b) => b.timestamp - a.timestamp)
 }
 
 export function buildFilterOptions(rows = []) {
-  const normalizedRows = Array.isArray(rows) ? rows : []
-
-  const sources = new Set()
+  const list = Array.isArray(rows) ? rows : []
+  const interactions = new Set()
   const results = new Set()
   const placements = new Set()
 
-  for (const row of normalizedRows) {
-    const source = cleanText(row.source)
+  list.forEach((row) => {
+    const interaction = cleanText(row.kind)
     const result = cleanText(row.result)
     const placement = cleanText(row.placementId)
-    if (source && source !== '-') sources.add(source)
+    if (interaction && interaction !== '-') interactions.add(interaction)
     if (result && result !== '-') results.add(result)
     if (placement && placement !== '-') placements.add(placement)
-  }
+  })
 
   return {
-    sources: ['ALL', ...Array.from(sources).sort()],
+    interactions: ['ALL', ...Array.from(interactions).sort()],
     results: ['ALL', ...Array.from(results).sort()],
     placements: ['ALL', ...Array.from(placements).sort()],
   }

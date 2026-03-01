@@ -31,21 +31,15 @@ function createDashboardSnapshot(placements, appId) {
         ecpm: 8.9,
         cpa: 2.01,
       },
-      byAccount: [
-        { accountId: 'org_smoke', requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, cpa: 2.01 },
-      ],
-      byApp: [
-        { accountId: 'org_smoke', appId: scopedAppId, requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, cpa: 2.01 },
-      ],
-      byPlacement: [
-        { accountId: 'org_smoke', appId: scopedAppId, placementId: 'chat_from_answer_v1', layer: 'runtime', requests: 1800, settledConversions: 21, settledRevenueUsd: 42.12, ctr: 0.07, fillRate: 0.66, cpa: 2.01 },
-      ],
+      byAccount: [],
+      byApp: [],
+      byPlacement: [],
     },
     placements,
     placementAuditLogs: [
       {
         id: 'audit_1',
-        requestId: 'req_audit_1',
+        requestId: 'req_1',
         createdAt: '2026-02-25T10:02:00.000Z',
         action: 'placement_toggle',
         status: 'ok',
@@ -64,17 +58,7 @@ function createDashboardSnapshot(placements, appId) {
       runtimeErrors: 5,
       circuitOpenEvaluations: 0,
     },
-    networkFlowLogs: [
-      {
-        id: 'flow_1',
-        traceId: 'trace_runtime_1',
-        createdAt: '2026-02-25T10:03:00.000Z',
-        stage: 'bid_request',
-        status: 'success',
-        placementId: 'chat_from_answer_v1',
-        message: 'runtime bid success',
-      },
-    ],
+    networkFlowLogs: [],
     decisionLogs: [
       {
         id: 'log_1',
@@ -97,6 +81,16 @@ function createDashboardSnapshot(placements, appId) {
         placementId: 'chat_from_answer_v1',
         targetUrl: 'https://ads.example.com/c/req_1',
         reasonCode: 'click_recorded',
+        revenueUsd: 0.5,
+      },
+      {
+        id: 'event_2',
+        requestId: 'req_1',
+        createdAt: '2026-02-25T10:05:00.000Z',
+        eventType: 'postback',
+        postbackStatus: 'success',
+        placementId: 'chat_from_answer_v1',
+        revenueUsd: 1.2,
       },
     ],
     controlPlaneApps: [
@@ -136,8 +130,8 @@ test.describe('dashboard smoke flow', () => {
       session: { id: 'sess_1' },
       scope: { accountId: 'org_smoke', appId: scopedAppId },
       onboarding: {
-        status: 'locked',
-        verifiedAt: '',
+        status: 'verified',
+        verifiedAt: '2026-02-25T10:00:00.000Z',
       },
     })
 
@@ -183,6 +177,16 @@ test.describe('dashboard smoke flow', () => {
         loggedIn = false
         await json(200, { ok: true }, {
           'set-cookie': 'dash_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax',
+        })
+        return
+      }
+
+      if (pathname === '/api/v1/public/quick-start/verify' && method === 'POST') {
+        await json(200, {
+          ok: true,
+          status: 'ready',
+          requestId: 'verify_req_1',
+          evidence: { inventory: { ready: true } },
         })
         return
       }
@@ -272,29 +276,9 @@ test.describe('dashboard smoke flow', () => {
 
       await json(404, { error: { code: 'NOT_FOUND', message: `${method} ${pathname}` } })
     })
-
-    await page.route('**/api/v2/bid', async (route) => {
-      const request = route.request()
-      if (request.method().toUpperCase() !== 'POST') {
-        await route.continue()
-        return
-      }
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json; charset=utf-8',
-        body: JSON.stringify({
-          requestId: 'req_bid_smoke_1',
-          status: 'success',
-          message: 'No bid',
-          filled: false,
-          landingUrl: null,
-          data: { bid: null },
-        }),
-      })
-    })
   })
 
-  test('login -> onboarding -> key generation -> unlock full navigation', async ({ page }) => {
+  test('login -> minimal nav -> settings actions -> click-chain logs', async ({ page }) => {
     await page.goto('/login')
 
     await expect(page.getByRole('heading', { name: 'Sign In' })).toBeVisible()
@@ -302,29 +286,26 @@ test.describe('dashboard smoke flow', () => {
     await page.getByLabel('Password').fill('smoke-password')
     await page.getByRole('button', { name: 'Sign In' }).click()
 
-    await expect(page).toHaveURL(/\/onboarding$/)
-
-    await page.getByRole('button', { name: 'Generate Runtime Key' }).click()
-    await expect(page.getByLabel('Runtime API Key')).toHaveValue('sk_live_new_secret')
-
-    await page.locator('aside .nav-link[href="/home"]').first().click()
     await expect(page).toHaveURL(/\/home$/)
-    await expect(page.getByRole('heading', { name: 'Key Metrics', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+    await expect(page.locator('aside .nav-link')).toHaveCount(3)
 
-    await page.getByRole('button', { name: 'Advanced Tools' }).click()
-    await expect(page.getByRole('button', { name: 'Hide Tools' })).toBeVisible()
+    await expect(page.getByText('Revenue')).toBeVisible()
+    await expect(page.getByText('Requests')).toBeVisible()
+    await expect(page.getByText('Fill Rate')).toBeVisible()
+    await expect(page.getByText('Errors')).toBeVisible()
 
-    await page.locator('aside .nav-link[href="/usage"]').first().click()
-    await expect(page).toHaveURL(/\/usage$/)
-    await expect(page.getByRole('heading', { name: 'Usage & Revenue' })).toBeVisible()
+    await page.locator('aside .nav-link[href="/settings"]').first().click()
+    await expect(page).toHaveURL(/\/settings(\?section=integration)?$/)
+    await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
 
-    await page.locator('aside .nav-link[href="/api-keys"]').first().click()
-    await expect(page).toHaveURL(/\/api-keys$/)
-    await expect(page.getByRole('heading', { name: 'Key', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'API Keys' }).click()
+    await expect(page).toHaveURL(/\/settings\?section=keys$/)
+    await page.getByRole('button', { name: 'Generate Key' }).click()
+    await expect(page.getByText('Secret (once):')).toBeVisible()
 
-    await page.locator('aside .nav-link[href="/config"]').first().click()
-    await expect(page).toHaveURL(/\/config$/)
-    await expect(page.getByRole('heading', { name: 'Placement', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Placement' }).click()
+    await expect(page).toHaveURL(/\/settings\?section=placement$/)
     const thresholdInput = page.getByLabel('Intent Threshold').first()
     await expect(thresholdInput).toHaveValue('0.7')
     await thresholdInput.fill('0.82')
@@ -333,18 +314,16 @@ test.describe('dashboard smoke flow', () => {
 
     await page.locator('aside .nav-link[href="/logs"]').first().click()
     await expect(page).toHaveURL(/\/logs$/)
-    await expect(page.getByRole('heading', { name: 'Chain Logs', exact: true })).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'runtime_flow' })).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'placement_audit' })).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'runtime_event' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Interaction Chains', exact: true })).toBeVisible()
     await expect(page.getByRole('link', { name: 'https://ads.example.com/c/req_1' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'success' })).toBeVisible()
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)
   })
 
-  test('unauthenticated onboarding access redirects to login with return path', async ({ page }) => {
-    await page.goto('/onboarding')
-    await expect(page).toHaveURL(/\/login\?redirect=\/onboarding$/)
+  test('legacy route redirects to login with new target', async ({ page }) => {
+    await page.goto('/usage')
+    await expect(page).toHaveURL(/\/login\?redirect=\/home$/)
   })
 })
