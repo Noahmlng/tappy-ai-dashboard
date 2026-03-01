@@ -21,7 +21,7 @@ async function handleRegister() {
       email: draft.email,
       password: draft.password,
     })
-    await router.replace('/onboarding')
+    await router.replace('/home')
   } catch (error) {
     submitError.value = error instanceof Error ? error.message : 'Register failed'
   }

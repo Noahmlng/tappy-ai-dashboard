@@ -9,34 +9,17 @@ const router = useRouter()
 const isPublicRoute = computed(() => Boolean(route.meta?.publicRoute))
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(false)
-const advancedNavExpanded = ref(false)
 
 const coreNavItems = [
-  { to: '/onboarding', label: 'Onboarding', icon: 'flash' },
-  { to: '/home', label: 'Revenue', icon: 'home' },
-  { to: '/logs', label: 'Logs', icon: 'list' },
-]
-
-const advancedNavItems = [
-  { to: '/usage', label: 'Usage', icon: 'chart' },
-  { to: '/api-keys', label: 'Key', icon: 'key' },
-  { to: '/config', label: 'Placement', icon: 'sliders' },
+  { to: '/home', label: 'Overview', icon: 'home' },
+  { to: '/logs', label: 'Chains', icon: 'list' },
+  { to: '/settings', label: 'Settings', icon: 'sliders' },
 ]
 
 const navItems = computed(() => {
   if (!authState.authenticated) return []
-  return advancedNavExpanded.value
-    ? [...coreNavItems, ...advancedNavItems]
-    : coreNavItems
+  return coreNavItems
 })
-
-const showAdvancedNavToggle = computed(() => (
-  authState.authenticated
-))
-
-function toggleAdvancedNav() {
-  advancedNavExpanded.value = !advancedNavExpanded.value
-}
 
 function toggleSidebar() {
   sidebarOpen.value = !sidebarOpen.value
@@ -95,9 +78,7 @@ function handleWindowResize() {
 
 onMounted(() => {
   const cachedCollapsed = typeof window !== 'undefined' ? window.localStorage.getItem('dashboard.sidebarCollapsed') : null
-  const cachedAdvanced = typeof window !== 'undefined' ? window.localStorage.getItem('dashboard.navAdvancedExpanded') : null
   sidebarCollapsed.value = cachedCollapsed === '1'
-  advancedNavExpanded.value = cachedAdvanced === '1'
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('resize', handleWindowResize, { passive: true })
 })
@@ -113,11 +94,6 @@ onBeforeUnmount(() => {
 watch(sidebarCollapsed, (value) => {
   if (typeof window === 'undefined') return
   window.localStorage.setItem('dashboard.sidebarCollapsed', value ? '1' : '0')
-})
-
-watch(advancedNavExpanded, (value) => {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem('dashboard.navAdvancedExpanded', value ? '1' : '0')
 })
 
 watch(sidebarOpen, (value) => {
@@ -226,15 +202,6 @@ watch(
           <span class="nav-tooltip">{{ item.label }}</span>
         </RouterLink>
       </nav>
-      <button
-        v-if="showAdvancedNavToggle"
-        class="button button-secondary nav-advanced-toggle"
-        type="button"
-        @click="toggleAdvancedNav"
-      >
-        {{ advancedNavExpanded ? 'Hide Tools' : 'Advanced Tools' }}
-      </button>
-
       <div class="side-nav-footer">
         <div class="nav-meta">
           <p class="muted mono">{{ authState.user?.email || '-' }}</p>

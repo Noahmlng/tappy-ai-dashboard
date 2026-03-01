@@ -22,7 +22,7 @@ async function handleLogin() {
       email: draft.email,
       password: draft.password,
     })
-    const redirect = String(route.query.redirect || '/onboarding')
+    const redirect = String(route.query.redirect || '/home')
     await router.replace(redirect)
   } catch (error) {
     submitError.value = error instanceof Error ? error.message : 'Login failed'
