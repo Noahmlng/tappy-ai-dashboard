@@ -157,10 +157,12 @@ export async function hydrateAuthSession() {
     const payload = await controlPlaneClient.auth.me()
     applyAuthPayload(payload)
   } catch (error) {
-    clearAuthState()
     const status = Number(error?.status || 0)
-    if (status !== 401 && status !== 403) {
-      authState.error = error instanceof Error ? error.message : 'Failed to restore session'
+    if (status === 401 || status === 403) {
+      clearAuthState()
+    } else {
+      const message = error instanceof Error ? error.message : 'Session refresh failed'
+      authState.error = `Session refresh failed (${message}). Retrying on next navigation or focus.`
     }
   } finally {
     authState.loading = false

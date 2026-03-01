@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { controlPlaneClient, setDashboardAccessToken } from '../../src/api/control-plane-client'
 import {
   authState,
+  hydrateAuthSession,
   isOnboardingUnlocked,
   isOnboardingVerified,
   loginDashboardUser,
@@ -126,5 +127,39 @@ describe('auth-state onboarding behavior', () => {
 
     const [, options] = fetchMock.mock.calls[0]
     expect(options.headers.Authorization).toBeUndefined()
+  })
+
+  it('keeps authenticated session when hydrate fails with non-auth error', async () => {
+    authState.user = { email: 'keep@example.com', accountId: 'org_keep' }
+    authState.session = { id: 'sess_keep' }
+    authState.authenticated = true
+    authState.ready = false
+    vi.spyOn(controlPlaneClient.auth, 'me').mockRejectedValue(
+      Object.assign(new Error('upstream unavailable'), { status: 500 }),
+    )
+
+    await hydrateAuthSession()
+
+    expect(authState.authenticated).toBe(true)
+    expect(authState.user?.email).toBe('keep@example.com')
+    expect(authState.error).toContain('Session refresh failed')
+    expect(authState.ready).toBe(true)
+  })
+
+  it('clears session when hydrate returns unauthorized', async () => {
+    authState.user = { email: 'drop@example.com', accountId: 'org_drop' }
+    authState.session = { id: 'sess_drop' }
+    authState.authenticated = true
+    authState.ready = false
+    vi.spyOn(controlPlaneClient.auth, 'me').mockRejectedValue(
+      Object.assign(new Error('Unauthorized'), { status: 401 }),
+    )
+
+    await hydrateAuthSession()
+
+    expect(authState.authenticated).toBe(false)
+    expect(authState.user).toBeNull()
+    expect(authState.error).toBe('')
+    expect(authState.ready).toBe(true)
   })
 })
