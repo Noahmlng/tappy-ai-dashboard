@@ -97,15 +97,49 @@ function normalizePlacementAuditLog(row = {}, index = 0) {
   }
 }
 
+function normalizeRuntimeEventLog(row = {}, index = 0) {
+  const timestamp = toTimestamp(
+    firstText(row, ['createdAt', 'timestamp', 'occurredAt', 'eventAt']),
+    Date.now() - index,
+  )
+  const linkUrl = firstText(row, [
+    'targetUrl',
+    'clickUrl',
+    'landingUrl',
+    'trackingUrl',
+    'url',
+  ])
+
+  return {
+    id: firstText(row, ['id', 'eventId', 'requestId', 'traceId']) || `runtime_event_${index}`,
+    timestamp,
+    timeLabel: firstText(row, ['createdAt', 'occurredAt', 'eventAt']) || '-',
+    traceId: firstText(row, ['requestId', 'traceId', 'id']) || '-',
+    source: 'runtime_event',
+    stage: firstText(row, ['eventType', 'event', 'kind']) || 'sdk_event',
+    result: firstText(row, ['result', 'status', 'eventStatus']) || '-',
+    placementId: firstText(row, ['placementId', 'placement', 'placement_id']) || '-',
+    detail: buildDetail(row, ['reasonDetail', 'reason', 'message', 'reasonCode']),
+    kind: firstText(row, ['kind']) || '-',
+    eventType: firstText(row, ['eventType']) || '-',
+    linkUrl: linkUrl || '-',
+    adId: firstText(row, ['adId']) || '-',
+    factId: firstText(row, ['factId']) || '-',
+    revenueUsd: Number.isFinite(Number(row?.revenueUsd)) ? Number(row.revenueUsd) : 0,
+  }
+}
+
 export function buildUnifiedLogs(input = {}) {
   const decisionLogs = Array.isArray(input.decisionLogs) ? input.decisionLogs : []
   const networkFlowLogs = Array.isArray(input.networkFlowLogs) ? input.networkFlowLogs : []
   const placementAuditLogs = Array.isArray(input.placementAuditLogs) ? input.placementAuditLogs : []
+  const eventLogs = Array.isArray(input.eventLogs) ? input.eventLogs : []
 
   const mapped = [
     ...decisionLogs.map((row, index) => normalizeDecisionLog(row, index)),
     ...networkFlowLogs.map((row, index) => normalizeRuntimeFlowLog(row, index)),
     ...placementAuditLogs.map((row, index) => normalizePlacementAuditLog(row, index)),
+    ...eventLogs.map((row, index) => normalizeRuntimeEventLog(row, index)),
   ]
 
   return mapped.sort((a, b) => b.timestamp - a.timestamp)

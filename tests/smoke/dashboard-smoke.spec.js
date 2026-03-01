@@ -85,6 +85,20 @@ function createDashboardSnapshot(placements, appId) {
         reason: 'eligible',
       },
     ],
+    eventLogs: [
+      {
+        id: 'event_1',
+        requestId: 'req_1',
+        createdAt: '2026-02-25T10:04:00.000Z',
+        eventType: 'sdk_event',
+        kind: 'click',
+        event: 'click',
+        result: 'recorded',
+        placementId: 'chat_from_answer_v1',
+        targetUrl: 'https://ads.example.com/c/req_1',
+        reasonCode: 'click_recorded',
+      },
+    ],
     controlPlaneApps: [
       { accountId: 'org_smoke', appId: scopedAppId, displayName: 'Smoke App' },
     ],
@@ -322,6 +336,8 @@ test.describe('dashboard smoke flow', () => {
     await expect(page.getByRole('heading', { name: 'Chain Logs', exact: true })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'runtime_flow' })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'placement_audit' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'runtime_event' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'https://ads.example.com/c/req_1' })).toBeVisible()
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)

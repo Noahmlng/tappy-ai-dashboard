@@ -7,6 +7,7 @@ import { buildFilterOptions, buildUnifiedLogs } from '../state/logs-view-model'
 
 const resultFilter = ref('ALL')
 const sourceFilter = ref('ALL')
+const interactionFilter = ref('ALL')
 const placementFilter = ref('ALL')
 const isLoading = computed(() => Boolean(dashboardState.meta.loading))
 
@@ -22,6 +23,7 @@ const allRows = computed(() => buildUnifiedLogs({
   decisionLogs: dashboardState.decisionLogs,
   networkFlowLogs: dashboardState.networkFlowLogs,
   placementAuditLogs: dashboardState.placementAuditLogs,
+  eventLogs: dashboardState.eventLogs,
 }))
 
 const filterOptions = computed(() => buildFilterOptions(allRows.value))
@@ -30,8 +32,9 @@ const filteredLogs = computed(() => {
   return allRows.value.filter((row) => {
     const matchResult = resultFilter.value === 'ALL' || row.result === resultFilter.value
     const matchSource = sourceFilter.value === 'ALL' || row.source === sourceFilter.value
+    const matchInteraction = interactionFilter.value === 'ALL' || row.kind === interactionFilter.value
     const matchPlacement = placementFilter.value === 'ALL' || row.placementId === placementFilter.value
-    return matchResult && matchSource && matchPlacement
+    return matchResult && matchSource && matchInteraction && matchPlacement
   })
 })
 
@@ -87,6 +90,17 @@ function resultPillClass(result) {
         </label>
 
         <label>
+          Interaction
+          <select v-model="interactionFilter" class="input">
+            <option value="ALL">ALL</option>
+            <option value="click">click</option>
+            <option value="impression">impression</option>
+            <option value="conversion">conversion</option>
+            <option value="postback">postback</option>
+          </select>
+        </label>
+
+        <label>
           Placement
           <select v-model="placementFilter" class="input">
             <option v-for="option in filterOptions.placements" :key="`placement-${option}`" :value="option">{{ option }}</option>
@@ -103,6 +117,8 @@ function resultPillClass(result) {
               <th>Source</th>
               <th>Stage/Event</th>
               <th>Result/Status</th>
+              <th>Interaction</th>
+              <th>Link</th>
               <th>Placement</th>
               <th>Detail</th>
             </tr>
@@ -116,11 +132,18 @@ function resultPillClass(result) {
               <td>
                 <span :class="resultPillClass(row.result)">{{ row.result }}</span>
               </td>
+              <td>{{ row.kind || '-' }}</td>
+              <td>
+                <a v-if="row.linkUrl && row.linkUrl !== '-'" :href="row.linkUrl" target="_blank" rel="noopener noreferrer">
+                  {{ row.linkUrl }}
+                </a>
+                <span v-else>-</span>
+              </td>
               <td>{{ row.placementId }}</td>
               <td>{{ row.detail }}</td>
             </tr>
             <tr v-if="filteredLogs.length === 0">
-              <td colspan="7" class="muted">No chain logs.</td>
+              <td colspan="9" class="muted">No chain logs.</td>
             </tr>
           </tbody>
         </table>

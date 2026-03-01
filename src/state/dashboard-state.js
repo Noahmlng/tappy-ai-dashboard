@@ -50,6 +50,7 @@ function buildEmptyDashboardState() {
     },
     networkFlowLogs: [],
     decisionLogs: [],
+    eventLogs: [],
     controlPlaneApps: [],
     scope: {},
   }
@@ -116,6 +117,7 @@ function shapeState(value) {
       ? value.networkFlowLogs
       : (Array.isArray(fallback.networkFlowLogs) ? fallback.networkFlowLogs : []),
     decisionLogs: Array.isArray(value.decisionLogs) ? value.decisionLogs : fallback.decisionLogs,
+    eventLogs: Array.isArray(value.eventLogs) ? value.eventLogs : [],
     controlPlaneApps: Array.isArray(value.controlPlaneApps) ? value.controlPlaneApps : [],
     scope: value.scope && typeof value.scope === 'object' ? value.scope : {},
   }
@@ -148,6 +150,7 @@ function applySnapshot(snapshot, options = {}) {
   dashboardState.networkFlowStats = next.networkFlowStats
   dashboardState.networkFlowLogs = next.networkFlowLogs
   dashboardState.decisionLogs = next.decisionLogs
+  dashboardState.eventLogs = next.eventLogs
   dashboardState.controlPlaneApps = next.controlPlaneApps
   dashboardState.scope = next.scope
   if (markSynced) {
@@ -286,6 +289,7 @@ export function resetDashboardState() {
   dashboardState.networkFlowStats = next.networkFlowStats
   dashboardState.networkFlowLogs = next.networkFlowLogs
   dashboardState.decisionLogs = next.decisionLogs
+  dashboardState.eventLogs = next.eventLogs
   dashboardState.controlPlaneApps = next.controlPlaneApps
   dashboardState.scope = next.scope
   dashboardState.meta.connected = false
