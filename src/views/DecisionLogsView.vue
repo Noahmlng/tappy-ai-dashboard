@@ -3,8 +3,10 @@ import { computed, ref } from 'vue'
 
 import { useAutoRefresh } from '../composables/use-auto-refresh'
 import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
+import { buildFilterOptions, buildUnifiedLogs } from '../state/logs-view-model'
 
 const resultFilter = ref('ALL')
+const sourceFilter = ref('ALL')
 const placementFilter = ref('ALL')
 const isLoading = computed(() => Boolean(dashboardState.meta.loading))
 
@@ -16,36 +18,31 @@ const { triggerRefresh: refreshLogs } = useAutoRefresh(
   },
 )
 
-const placementOptions = computed(() => {
-  const placementIds = Array.isArray(dashboardState.placements)
-    ? dashboardState.placements.map((item) => item.placementId)
-    : []
-  return ['ALL', ...placementIds]
-})
+const allRows = computed(() => buildUnifiedLogs({
+  decisionLogs: dashboardState.decisionLogs,
+  networkFlowLogs: dashboardState.networkFlowLogs,
+  placementAuditLogs: dashboardState.placementAuditLogs,
+}))
+
+const filterOptions = computed(() => buildFilterOptions(allRows.value))
 
 const filteredLogs = computed(() => {
-  const rows = Array.isArray(dashboardState.decisionLogs) ? dashboardState.decisionLogs : []
-  return rows.filter((row) => {
+  return allRows.value.filter((row) => {
     const matchResult = resultFilter.value === 'ALL' || row.result === resultFilter.value
+    const matchSource = sourceFilter.value === 'ALL' || row.source === sourceFilter.value
     const matchPlacement = placementFilter.value === 'ALL' || row.placementId === placementFilter.value
-    return matchResult && matchPlacement
+    return matchResult && matchSource && matchPlacement
   })
 })
 
-function resultPillClass(result) {
-  if (result === 'served') return 'status-pill good'
-  if (result === 'error') return 'status-pill bad'
-  return 'status-pill warn'
-}
+const hasRuntimeFlowLogs = computed(() => (
+  Array.isArray(dashboardState.networkFlowLogs) && dashboardState.networkFlowLogs.length > 0
+))
 
-function displayReason(row) {
-  if (typeof row?.reasonDetail === 'string' && row.reasonDetail.trim()) {
-    return row.reasonDetail.trim()
-  }
-  if (typeof row?.reason === 'string' && row.reason.trim()) {
-    return row.reason.trim()
-  }
-  return '-'
+function resultPillClass(result) {
+  if (result === 'served' || result === 'success' || result === 'ok') return 'status-pill good'
+  if (result === 'error' || result === 'failed') return 'status-pill bad'
+  return 'status-pill warn'
 }
 </script>
 
@@ -54,8 +51,8 @@ function displayReason(row) {
     <header class="page-header page-header-split">
       <div class="header-stack">
         <p class="eyebrow">Logs</p>
-        <h2>Logs</h2>
-        <p class="subtitle">Filter</p>
+        <h2>Chain Logs</h2>
+        <p class="subtitle">Decision + Runtime Flow + Placement Audit</p>
       </div>
       <div class="header-actions">
         <button class="button" type="button" :disabled="isLoading" @click="refreshLogs">
@@ -70,22 +67,29 @@ function displayReason(row) {
         <p class="muted">{{ filteredLogs.length }}</p>
       </div>
 
+      <p v-if="!hasRuntimeFlowLogs" class="muted">
+        当前上游未返回 runtime flow logs
+      </p>
+
       <div class="filters">
         <label>
           Result
           <select v-model="resultFilter" class="input">
-            <option value="ALL">ALL</option>
-            <option value="served">served</option>
-            <option value="blocked">blocked</option>
-            <option value="no_fill">no_fill</option>
-            <option value="error">error</option>
+            <option v-for="option in filterOptions.results" :key="`result-${option}`" :value="option">{{ option }}</option>
+          </select>
+        </label>
+
+        <label>
+          Source
+          <select v-model="sourceFilter" class="input">
+            <option v-for="option in filterOptions.sources" :key="`source-${option}`" :value="option">{{ option }}</option>
           </select>
         </label>
 
         <label>
           Placement
           <select v-model="placementFilter" class="input">
-            <option v-for="option in placementOptions" :key="option" :value="option">{{ option }}</option>
+            <option v-for="option in filterOptions.placements" :key="`placement-${option}`" :value="option">{{ option }}</option>
           </select>
         </label>
       </div>
@@ -95,24 +99,28 @@ function displayReason(row) {
           <thead>
             <tr>
               <th>Time</th>
-              <th>Req ID</th>
+              <th>Trace/Req ID</th>
+              <th>Source</th>
+              <th>Stage/Event</th>
+              <th>Result/Status</th>
               <th>Placement</th>
-              <th>Result</th>
-              <th>Reason</th>
+              <th>Detail</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in filteredLogs" :key="row.id || row.requestId">
-              <td>{{ row.createdAt || '-' }}</td>
-              <td>{{ row.requestId || '-' }}</td>
-              <td>{{ row.placementId || '-' }}</td>
+            <tr v-for="row in filteredLogs" :key="`${row.source}-${row.id}-${row.timestamp}`">
+              <td>{{ row.timeLabel }}</td>
+              <td>{{ row.traceId }}</td>
+              <td><code>{{ row.source }}</code></td>
+              <td>{{ row.stage }}</td>
               <td>
-                <span :class="resultPillClass(row.result)">{{ row.result || '-' }}</span>
+                <span :class="resultPillClass(row.result)">{{ row.result }}</span>
               </td>
-              <td>{{ displayReason(row) }}</td>
+              <td>{{ row.placementId }}</td>
+              <td>{{ row.detail }}</td>
             </tr>
             <tr v-if="filteredLogs.length === 0">
-              <td colspan="5" class="muted">No rows.</td>
+              <td colspan="7" class="muted">No chain logs.</td>
             </tr>
           </tbody>
         </table>

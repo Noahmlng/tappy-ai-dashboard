@@ -8,20 +8,8 @@ import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
 const isLoading = computed(() => Boolean(dashboardState.meta?.loading))
 
 const totals = computed(() => dashboardState.settlementAggregates?.totals || {})
-const reasonRatios = computed(() => {
-  const fromTotals = totals.value?.reasonRatios
-  if (fromTotals && typeof fromTotals === 'object') return fromTotals
+const networkFlowStats = computed(() => dashboardState.networkFlowStats || {})
 
-  const fromSettlement = dashboardState.settlementAggregates?.reasonRatios
-  if (fromSettlement && typeof fromSettlement === 'object') return fromSettlement
-
-  return {}
-})
-
-function formatRatioPercent(value) {
-  const numeric = Number(value || 0)
-  return `${(numeric * 100).toFixed(2)}%`
-}
 const lastSyncedLabel = computed(() => {
   const raw = dashboardState.meta?.lastSyncedAt
   if (!raw) return 'Not synced'
@@ -30,34 +18,37 @@ const lastSyncedLabel = computed(() => {
   return value.toLocaleString()
 })
 
+function formatPercent(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '-'
+  return `${(numeric * 100).toFixed(2)}%`
+}
+
 const revenueCards = computed(() => {
   const row = totals.value
   const revenue = Number(row.settledRevenueUsd || 0)
   const requests = Number(row.requests || 0)
   const conversions = Number(row.settledConversions || 0)
+  const fillRate = Number(row.fillRate || 0)
+
+  const runtimeErrors = Number(networkFlowStats.value.runtimeErrors || 0)
+  const runtimeEvaluations = Number(networkFlowStats.value.totalRuntimeEvaluations || 0)
+  const runtimeErrorRate = runtimeEvaluations > 0
+    ? runtimeErrors / runtimeEvaluations
+    : Number.NaN
 
   return [
     { label: 'Revenue', value: `$${revenue.toFixed(2)}` },
     { label: 'Requests', value: requests.toLocaleString() },
     { label: 'Conversions', value: conversions.toLocaleString() },
-    {
-      label: 'placement_unavailable',
-      value: formatRatioPercent(reasonRatios.value.placement_unavailable),
-    },
-    {
-      label: 'inventory_empty',
-      value: formatRatioPercent(reasonRatios.value.inventory_empty),
-    },
-    {
-      label: 'scope_violation',
-      value: formatRatioPercent(reasonRatios.value.scope_violation),
-    },
+    { label: 'Fill Rate', value: formatPercent(fillRate) },
+    { label: 'Runtime Error Rate', value: formatPercent(runtimeErrorRate) },
   ]
 })
 
 const coreActions = [
   { to: '/onboarding', title: 'Integrate (3 min)' },
-  { to: '/logs', title: 'Logs' },
+  { to: '/logs', title: 'Open Chain Logs' },
 ]
 
 const { triggerRefresh: refreshRevenue } = useAutoRefresh(
@@ -74,7 +65,7 @@ const { triggerRefresh: refreshRevenue } = useAutoRefresh(
     <header class="page-header page-header-split">
       <div class="header-stack">
         <p class="eyebrow">Revenue</p>
-        <h2>Revenue</h2>
+        <h2>Key Metrics</h2>
         <p class="subtitle">{{ lastSyncedLabel }}</p>
       </div>
       <div class="header-actions">
@@ -93,7 +84,7 @@ const { triggerRefresh: refreshRevenue } = useAutoRefresh(
 
     <article class="panel panel-soft">
       <div class="panel-toolbar">
-        <h3>Core</h3>
+        <h3>Core Actions</h3>
       </div>
       <div class="rail-actions">
         <RouterLink

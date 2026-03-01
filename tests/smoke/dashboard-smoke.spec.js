@@ -13,8 +13,8 @@ function createDashboardSnapshot(placements, appId) {
       fillRate: 0.71,
     },
     metricsByDay: [
-      { day: '2026-02-20', impressions: 100, clicks: 8, revenueUsd: 1.2 },
-      { day: '2026-02-21', impressions: 130, clicks: 10, revenueUsd: 1.5 },
+      { day: '2026-02-20', requests: 100, settledConversions: 8, revenueUsd: 1.2 },
+      { day: '2026-02-21', requests: 130, settledConversions: 10, revenueUsd: 1.5 },
     ],
     settlementAggregates: {
       settlementModel: 'CPA',
@@ -42,19 +42,39 @@ function createDashboardSnapshot(placements, appId) {
       ],
     },
     placements,
-    placementAuditLogs: [],
+    placementAuditLogs: [
+      {
+        id: 'audit_1',
+        requestId: 'req_audit_1',
+        createdAt: '2026-02-25T10:02:00.000Z',
+        action: 'placement_toggle',
+        status: 'ok',
+        placementId: 'chat_from_answer_v1',
+        changedCount: 1,
+      },
+    ],
     networkHealth: {},
     networkHealthSummary: { totalNetworks: 0, healthy: 0, degraded: 0, open: 0 },
     networkFlowStats: {
-      totalRuntimeEvaluations: 0,
+      totalRuntimeEvaluations: 100,
       degradedRuntimeEvaluations: 0,
       resilientServes: 0,
       servedWithNetworkErrors: 0,
       noFillWithNetworkErrors: 0,
-      runtimeErrors: 0,
+      runtimeErrors: 5,
       circuitOpenEvaluations: 0,
     },
-    networkFlowLogs: [],
+    networkFlowLogs: [
+      {
+        id: 'flow_1',
+        traceId: 'trace_runtime_1',
+        createdAt: '2026-02-25T10:03:00.000Z',
+        stage: 'bid_request',
+        status: 'success',
+        placementId: 'chat_from_answer_v1',
+        message: 'runtime bid success',
+      },
+    ],
     decisionLogs: [
       {
         id: 'log_1',
@@ -275,7 +295,7 @@ test.describe('dashboard smoke flow', () => {
 
     await page.locator('aside .nav-link[href="/home"]').first().click()
     await expect(page).toHaveURL(/\/home$/)
-    await expect(page.getByRole('heading', { name: 'Revenue', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Key Metrics', exact: true })).toBeVisible()
 
     await page.getByRole('button', { name: 'Advanced Tools' }).click()
     await expect(page.getByRole('button', { name: 'Hide Tools' })).toBeVisible()
@@ -299,7 +319,9 @@ test.describe('dashboard smoke flow', () => {
 
     await page.locator('aside .nav-link[href="/logs"]').first().click()
     await expect(page).toHaveURL(/\/logs$/)
-    await expect(page.getByRole('heading', { name: 'Logs', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Chain Logs', exact: true })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'runtime_flow' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'placement_audit' })).toBeVisible()
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)
