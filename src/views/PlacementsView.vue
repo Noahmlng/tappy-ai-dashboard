@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed } from 'vue'
 
+import { useAutoRefresh } from '../composables/use-auto-refresh'
 import {
   dashboardState,
   hydrateDashboardState,
@@ -49,13 +50,13 @@ function readTriggerValue(placement, key, fallback) {
   return Number.isFinite(numeric) ? numeric : fallback
 }
 
-function refreshConfig() {
-  hydrateDashboardState()
-}
-
-onMounted(() => {
-  refreshConfig()
-})
+const { triggerRefresh: refreshConfig } = useAutoRefresh(
+  () => hydrateDashboardState(),
+  {
+    intervalMs: 30_000,
+    isBusy: () => Boolean(dashboardState.meta.loading),
+  },
+)
 </script>
 
 <template>

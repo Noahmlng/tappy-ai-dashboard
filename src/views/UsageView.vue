@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed } from 'vue'
 
+import { useAutoRefresh } from '../composables/use-auto-refresh'
 import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
 import { scopeState } from '../state/scope-state'
 
@@ -100,13 +101,13 @@ const dailyRows = computed(() => {
   })
 })
 
-function refreshUsage() {
-  hydrateDashboardState()
-}
-
-onMounted(() => {
-  refreshUsage()
-})
+const { triggerRefresh: refreshUsage } = useAutoRefresh(
+  () => hydrateDashboardState(),
+  {
+    intervalMs: 30_000,
+    isBusy: () => Boolean(dashboardState.meta.loading),
+  },
+)
 </script>
 
 <template>

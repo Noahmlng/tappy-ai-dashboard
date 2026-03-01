@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import { useAutoRefresh } from '../composables/use-auto-refresh'
 import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
 
 const isLoading = computed(() => Boolean(dashboardState.meta?.loading))
@@ -59,13 +60,13 @@ const coreActions = [
   { to: '/logs', title: 'Logs' },
 ]
 
-function refreshRevenue() {
-  hydrateDashboardState()
-}
-
-onMounted(() => {
-  refreshRevenue()
-})
+const { triggerRefresh: refreshRevenue } = useAutoRefresh(
+  () => hydrateDashboardState(),
+  {
+    intervalMs: 30_000,
+    isBusy: () => Boolean(dashboardState.meta?.loading),
+  },
+)
 </script>
 
 <template>

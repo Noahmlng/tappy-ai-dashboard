@@ -1,19 +1,20 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 
+import { useAutoRefresh } from '../composables/use-auto-refresh'
 import { dashboardState, hydrateDashboardState } from '../state/dashboard-state'
 
 const resultFilter = ref('ALL')
 const placementFilter = ref('ALL')
 const isLoading = computed(() => Boolean(dashboardState.meta.loading))
 
-function refreshLogs() {
-  hydrateDashboardState()
-}
-
-onMounted(() => {
-  refreshLogs()
-})
+const { triggerRefresh: refreshLogs } = useAutoRefresh(
+  () => hydrateDashboardState(),
+  {
+    intervalMs: 30_000,
+    isBusy: () => Boolean(dashboardState.meta.loading),
+  },
+)
 
 const placementOptions = computed(() => {
   const placementIds = Array.isArray(dashboardState.placements)

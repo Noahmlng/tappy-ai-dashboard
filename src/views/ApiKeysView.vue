@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 
+import { useAutoRefresh } from '../composables/use-auto-refresh'
 import {
   apiKeysState,
   clearRevealedSecret,
@@ -49,9 +50,17 @@ async function refreshKeys() {
   await hydrateApiKeys()
 }
 
-onMounted(() => {
-  refreshKeys()
-})
+const { triggerRefresh } = useAutoRefresh(
+  () => refreshKeys(),
+  {
+    intervalMs: 30_000,
+    isBusy: () => Boolean(apiKeysState.meta.loading || apiKeysState.meta.syncing),
+  },
+)
+
+async function runRefreshKeys() {
+  await triggerRefresh()
+}
 </script>
 
 <template>
@@ -63,7 +72,7 @@ onMounted(() => {
         <p class="subtitle">One-click generation with auto scope assignment.</p>
       </div>
       <div class="header-actions">
-        <button class="button" type="button" :disabled="isBusy" @click="refreshKeys()">
+        <button class="button" type="button" :disabled="isBusy" @click="runRefreshKeys">
           {{ isBusy ? 'Sync...' : 'Sync' }}
         </button>
       </div>
