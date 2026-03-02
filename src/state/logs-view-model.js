@@ -25,6 +25,67 @@ function firstText(source, keys = []) {
   return ''
 }
 
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseJsonObjectLike(value) {
+  if (isPlainObject(value) || Array.isArray(value)) return value
+  const text = cleanText(value)
+  if (!text || (!text.startsWith('{') && !text.startsWith('['))) return null
+  try {
+    const parsed = JSON.parse(text)
+    if (isPlainObject(parsed) || Array.isArray(parsed)) return parsed
+    return null
+  } catch {
+    return null
+  }
+}
+
+function pickFirstObjectLike(source = {}, keys = []) {
+  for (const key of keys) {
+    const normalized = parseJsonObjectLike(source?.[key])
+    if (normalized) return normalized
+  }
+  return null
+}
+
+function extractDeveloperTrace(source = {}) {
+  const direct = pickFirstObjectLike(source, [
+    'developerTrace',
+    'devTrace',
+    'observabilityTrace',
+    'debugTrace',
+    'decisionTrace',
+    'traceDetails',
+    'trace',
+  ])
+  if (direct) return direct
+
+  const nestedContainers = [
+    source.debug,
+    source.observability,
+    source.diagnostics,
+    source.meta,
+    source.payload,
+    source.data,
+  ]
+  for (const container of nestedContainers) {
+    if (!isPlainObject(container)) continue
+    const nested = pickFirstObjectLike(container, [
+      'developerTrace',
+      'devTrace',
+      'observabilityTrace',
+      'debugTrace',
+      'decisionTrace',
+      'traceDetails',
+      'trace',
+    ])
+    if (nested) return nested
+  }
+  return null
+}
+
 function linkByPriority(source = {}) {
   const keys = ['targetUrl', 'clickUrl', 'landingUrl', 'trackingUrl', 'url']
   for (let index = 0; index < keys.length; index += 1) {
@@ -78,6 +139,7 @@ function normalizeEventRow(row = {}, index = 0) {
     result,
     revenueUsd: toNumber(row.revenueUsd, 0),
     detail: firstText(row, ['reasonDetail', 'reasonCode', 'reason', 'message']) || '-',
+    developerTrace: extractDeveloperTrace(row),
   }
 }
 
@@ -102,6 +164,7 @@ function normalizeDecisionRow(row = {}, index = 0) {
     result: firstText(row, ['result', 'status']) || '-',
     revenueUsd: 0,
     detail: firstText(row, ['reasonDetail', 'reason', 'message']) || '-',
+    developerTrace: extractDeveloperTrace(row),
   }
 }
 
@@ -126,6 +189,7 @@ function normalizeAuditRow(row = {}, index = 0) {
     result: firstText(row, ['status', 'result']) || '-',
     revenueUsd: 0,
     detail: firstText(row, ['reasonDetail', 'reason', 'message', 'action']) || '-',
+    developerTrace: extractDeveloperTrace(row),
   }
 }
 
@@ -171,6 +235,8 @@ export function buildUnifiedLogs(input = {}) {
         revenueUsd: 0,
         result: cleanText(row.result) || '-',
         detail: cleanText(row.detail) || '-',
+        developerTrace: row.developerTrace,
+        developerTraceTimestamp: row.developerTrace ? row.timestamp : 0,
         hasImpression: false,
         hasDecision: false,
       })
@@ -191,6 +257,10 @@ export function buildUnifiedLogs(input = {}) {
     if (cleanText(row.clickedLink) && row.clickedLinkPriority < chain.clickedLinkPriority) {
       chain.clickedLink = cleanText(row.clickedLink)
       chain.clickedLinkPriority = row.clickedLinkPriority
+    }
+    if (row.developerTrace && row.timestamp >= chain.developerTraceTimestamp) {
+      chain.developerTrace = row.developerTrace
+      chain.developerTraceTimestamp = row.timestamp
     }
 
     if (row.kind === 'click') {
@@ -228,6 +298,8 @@ export function buildUnifiedLogs(input = {}) {
         revenue: chain.revenueUsd,
         kind: interaction,
         result: primaryResult || '-',
+        developerTrace: chain.developerTrace || null,
+        hasDeveloperTrace: Boolean(chain.developerTrace),
       }
     })
     .sort((a, b) => b.timestamp - a.timestamp)

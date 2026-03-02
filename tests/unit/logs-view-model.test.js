@@ -96,4 +96,68 @@ describe('logs view model', () => {
       kind: 'impression',
     })
   })
+
+  it('keeps developer trace payload from decision logs', () => {
+    const rows = buildUnifiedLogs({
+      decisionLogs: [
+        {
+          id: 'dec_trace_1',
+          requestId: 'req_trace_1',
+          createdAt: '2026-02-25T10:00:00.000Z',
+          placementId: 'chat_from_answer_v1',
+          result: 'served',
+          developerTrace: {
+            search: {
+              query: 'running shoes',
+              totalResults: 12,
+            },
+            offerScores: [
+              { offerId: 'offer_a', score: 0.92 },
+              { offerId: 'offer_b', score: 0.61 },
+            ],
+          },
+        },
+      ],
+    })
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      requestId: 'req_trace_1',
+      kind: 'decision',
+      hasDeveloperTrace: true,
+      developerTrace: {
+        search: {
+          query: 'running shoes',
+          totalResults: 12,
+        },
+      },
+    })
+  })
+
+  it('parses developer trace when backend sends it as a JSON string', () => {
+    const rows = buildUnifiedLogs({
+      decisionLogs: [
+        {
+          id: 'dec_trace_2',
+          requestId: 'req_trace_2',
+          createdAt: '2026-02-25T10:00:00.000Z',
+          placementId: 'chat_from_answer_v1',
+          result: 'served',
+          observabilityTrace: '{"search":{"query":"coffee beans","totalResults":8}}',
+        },
+      ],
+    })
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      requestId: 'req_trace_2',
+      hasDeveloperTrace: true,
+      developerTrace: {
+        search: {
+          query: 'coffee beans',
+          totalResults: 8,
+        },
+      },
+    })
+  })
 })

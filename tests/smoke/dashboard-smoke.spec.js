@@ -67,6 +67,20 @@ function createDashboardSnapshot(placements, appId) {
         placementId: 'chat_from_answer_v1',
         result: 'served',
         reason: 'eligible',
+        developerTrace: {
+          search: {
+            query: 'best shoes for running',
+            totalResults: 6,
+          },
+          offerScores: [
+            { offerId: 'offer_1', score: 0.94 },
+            { offerId: 'offer_2', score: 0.78 },
+          ],
+          offerQuotes: [
+            { offerId: 'offer_1', quote: 1.25 },
+            { offerId: 'offer_2', quote: 0.96 },
+          ],
+        },
       },
     ],
     eventLogs: [
@@ -317,6 +331,7 @@ test.describe('dashboard smoke flow', () => {
     await expect(page.getByRole('heading', { name: 'Interaction Chains', exact: true })).toBeVisible()
     await expect(page.getByRole('link', { name: 'https://ads.example.com/c/req_1' })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'success' })).toBeVisible()
+    await expect(page.getByText('Dev-only Trace')).toBeVisible()
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/login$/)

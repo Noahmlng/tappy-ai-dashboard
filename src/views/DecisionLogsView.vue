@@ -44,6 +44,15 @@ function formatRevenue(value) {
   if (!Number.isFinite(numeric) || numeric <= 0) return '-'
   return `$${numeric.toFixed(2)}`
 }
+
+function formatDeveloperTrace(value) {
+  if (!value) return ''
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
 </script>
 
 <template>
@@ -107,6 +116,7 @@ function formatRevenue(value) {
               <th>Click Status</th>
               <th>Postback Status</th>
               <th>Revenue</th>
+              <th>Developer Trace</th>
             </tr>
           </thead>
           <tbody>
@@ -128,9 +138,16 @@ function formatRevenue(value) {
               <td>{{ row.clickStatus || '-' }}</td>
               <td>{{ row.postbackStatus || '-' }}</td>
               <td>{{ formatRevenue(row.revenue) }}</td>
+              <td>
+                <details v-if="row.hasDeveloperTrace" class="trace-disclosure">
+                  <summary>Dev-only Trace</summary>
+                  <pre class="trace-code">{{ formatDeveloperTrace(row.developerTrace) }}</pre>
+                </details>
+                <span v-else>-</span>
+              </td>
             </tr>
             <tr v-if="filteredRows.length === 0">
-              <td colspan="7" class="muted">No interaction chains.</td>
+              <td colspan="8" class="muted">No interaction chains.</td>
             </tr>
           </tbody>
         </table>

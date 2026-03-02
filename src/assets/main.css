@@ -1164,6 +1164,48 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.trace-disclosure {
+  display: grid;
+  gap: var(--space-8);
+}
+
+.trace-disclosure summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.trace-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.trace-disclosure summary::after {
+  content: " +";
+  color: #8390a7;
+}
+
+.trace-disclosure[open] summary::after {
+  content: " -";
+}
+
+.trace-code {
+  margin: 0;
+  border: var(--border);
+  border-radius: var(--radius-card);
+  background: #fff;
+  padding: var(--space-8);
+  min-width: 280px;
+  max-width: 420px;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 /* Status pills */
 .status-pill {
   display: inline-flex;
