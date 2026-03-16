@@ -16,7 +16,7 @@
     "check:dead-code": "node scripts/check-dead-code.mjs"
   },
   "dependencies": {
-    "vue": "^3.5.26",
+    "vue": "^3.5.30",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
